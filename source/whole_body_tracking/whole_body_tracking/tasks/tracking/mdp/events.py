@@ -91,3 +91,14 @@ def randomize_rigid_body_com(
 
     # Set the new coms
     asset.root_physx_view.set_coms(coms, env_ids)
+
+
+
+def compliance_event_tags(env: ManagerBasedEnv, env_ids: torch.Tensor | None = None):
+    """Optional event hook to expose event tags for compliance dataset collection."""
+    if not hasattr(env, "extras"):
+        env.extras = {}
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=env.device)
+    tags = torch.zeros(env.scene.num_envs, 3, device=env.device)
+    env.extras["compliance_event_tags"] = tags
