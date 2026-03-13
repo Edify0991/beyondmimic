@@ -1,41 +1,34 @@
-"""This script replay a motion from a csv file and output it to a npz file
+"""This script replay a motion from a pkl file and output it to a npz file
 
 .. code-block:: bash
 
     # Usage
-    python csv_to_npz.py --input_file LAFAN/dance1_subject2.csv --input_fps 30 --frame_range 122 722 \
-    --output_file ./motions/dance1_subject2.npz --output_fps 50
+    python pkl_to_npz.py --input_file ./motions/dance1_subject2.pkl --frame_range 122 722 \
+    --output_name dance1_subject2 --output_fps 50
 """
-
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import pickle
 import numpy as np
 
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Replay motion from csv file and output to npz file.")
-parser.add_argument("--input_file", type=str, required=True, help="The path to the input motion csv file.")
-parser.add_argument("--input_fps", type=int, default=30, help="The fps of the input motion.")
+parser = argparse.ArgumentParser(description="Replay motion from pkl file and output to npz file.")
+parser.add_argument("--input_file", type=str, required=True, help="The path to the input motion pkl file.")
 parser.add_argument(
     "--frame_range",
     nargs=2,
     type=int,
     metavar=("START", "END"),
     help=(
-        "frame range: START END (both inclusive). The frame index starts from 1. If not provided, all frames will be"
+        "frame range: START END (both inclusive). The frame index starts from 0. If not provided, all frames will be"
         " loaded."
     ),
 )
 parser.add_argument("--output_name", type=str, required=True, help="The name of the motion npz file.")
 parser.add_argument("--output_fps", type=int, default=50, help="The fps of the output motion.")
-# parser.add_argument(
-#     "--device",
-#     type=str,
-#     default="cpu",
-#     help="Device to run on, e.g., 'cpu', 'cuda:0', 'cuda:1', etc."
-# )
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -87,15 +80,12 @@ class MotionLoader:
     def __init__(
         self,
         motion_file: str,
-        input_fps: int,
         output_fps: int,
         device: torch.device,
         frame_range: tuple[int, int] | None,
     ):
         self.motion_file = motion_file
-        self.input_fps = input_fps
         self.output_fps = output_fps
-        self.input_dt = 1.0 / self.input_fps
         self.output_dt = 1.0 / self.output_fps
         self.current_idx = 0
         self.device = device
@@ -105,33 +95,49 @@ class MotionLoader:
         self._compute_velocities()
 
     def _load_motion(self):
-        """Loads the motion from the csv file."""
-        if self.frame_range is None:
-            motion = torch.from_numpy(np.loadtxt(self.motion_file, delimiter=","))
-        else:
-            motion = torch.from_numpy(
-                np.loadtxt(
-                    self.motion_file,
-                    delimiter=",",
-                    skiprows=self.frame_range[0] - 1,
-                    max_rows=self.frame_range[1] - self.frame_range[0] + 1,
-                )
-            )
-        motion = motion.to(torch.float32).to(self.device)
-        self.motion_base_poss_input = motion[:, :3]
-        self.motion_base_rots_input = motion[:, 3:7]
-        self.motion_base_rots_input = self.motion_base_rots_input[:, [3, 0, 1, 2]]  # convert to wxyz
-        self.motion_dof_poss_input = motion[:, 7:]
+        """Loads the motion from the pkl file."""
+        with open(self.motion_file, "rb") as f:
+            motion_data = pickle.load(f)
+        
+        # Extract data from pkl
+        self.input_fps = motion_data["fps"]
+        self.input_dt = 1.0 / self.input_fps
+        
+        # Convert to tensors
+        root_pos = torch.from_numpy(motion_data["root_pos"]).to(torch.float32).to(self.device)
+        root_rot = torch.from_numpy(motion_data["root_rot"]).to(torch.float32).to(self.device)
+        dof_pos = torch.from_numpy(motion_data["dof_pos"]).to(torch.float32).to(self.device)
+        
+        # Apply frame range if specified
+        if self.frame_range is not None:
+            start_idx = self.frame_range[0]
+            end_idx = self.frame_range[1] + 1  # +1 because end is inclusive
+            root_pos = root_pos[start_idx:end_idx]
+            root_rot = root_rot[start_idx:end_idx]
+            dof_pos = dof_pos[start_idx:end_idx]
+        
+        self.motion_base_poss_input = root_pos  # shape: (N, 3)
+        self.motion_base_rots_input = root_rot  # shape: (N, 4), assumed to be wxyz
+        self.motion_dof_poss_input = dof_pos    # shape: (N, num_dofs)
+        
+        # Store link body list if available
+        self.link_body_list = motion_data.get("link_body_list", None)
+        self.local_body_pos = motion_data.get("local_body_pos", None)
+        if self.local_body_pos is not None:
+            self.local_body_pos = torch.from_numpy(self.local_body_pos).to(torch.float32).to(self.device)
+            if self.frame_range is not None:
+                self.local_body_pos = self.local_body_pos[start_idx:end_idx]
 
-        self.input_frames = motion.shape[0]
+        self.input_frames = self.motion_base_poss_input.shape[0]
         self.duration = (self.input_frames - 1) * self.input_dt
-        print(f"Motion loaded ({self.motion_file}), duration: {self.duration} sec, frames: {self.input_frames}")
+        print(f"Motion loaded ({self.motion_file}), duration: {self.duration:.2f} sec, frames: {self.input_frames}, fps: {self.input_fps}")
 
     def _interpolate_motion(self):
         """Interpolates the motion to the output fps."""
         times = torch.arange(0, self.duration, self.output_dt, device=self.device, dtype=torch.float32)
         self.output_frames = times.shape[0]
         index_0, index_1, blend = self._compute_frame_blend(times)
+        
         self.motion_base_poss = self._lerp(
             self.motion_base_poss_input[index_0],
             self.motion_base_poss_input[index_1],
@@ -147,6 +153,7 @@ class MotionLoader:
             self.motion_dof_poss_input[index_1],
             blend.unsqueeze(1),
         )
+        
         print(
             f"Motion interpolated, input frames: {self.input_frames}, input fps: {self.input_fps}, output frames:"
             f" {self.output_frames}, output fps: {self.output_fps}"
@@ -167,7 +174,7 @@ class MotionLoader:
         """Computes the frame blend for the motion."""
         phase = times / self.duration
         index_0 = (phase * (self.input_frames - 1)).floor().long()
-        index_1 = torch.minimum(index_0 + 1, torch.tensor(self.input_frames - 1))
+        index_1 = torch.minimum(index_0 + 1, torch.tensor(self.input_frames - 1, device=self.device))
         blend = phase * (self.input_frames - 1) - index_0
         return index_0, index_1, blend
 
@@ -196,12 +203,8 @@ class MotionLoader:
     def get_next_state(
         self,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        bool,
     ]:
         """Gets the next state of the motion."""
         state = (
@@ -225,9 +228,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
     # Load motion
     motion = MotionLoader(
         motion_file=args_cli.input_file,
-        input_fps=args_cli.input_fps,
         output_fps=args_cli.output_fps,
-        # device=sim.device,
         device=torch.device(args_cli.device),
         frame_range=args_cli.frame_range,
     )
@@ -278,7 +279,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         joint_pos[:, robot_joint_indexes] = motion_dof_pos
         joint_vel[:, robot_joint_indexes] = motion_dof_vel
         robot.write_joint_state_to_sim(joint_pos, joint_vel)
-        sim.render()  # We don't want physic (sim.step())
+        sim.render()  # We don't want physics (sim.step())
         scene.update(sim.get_physics_dt())
 
         pos_lookat = root_states[0, :3].cpu().numpy()
@@ -304,17 +305,30 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
             ):
                 log[k] = np.stack(log[k], axis=0)
 
+            # Create tmp directory if it doesn't exist
+            import os
+            os.makedirs("tmp", exist_ok=True)
+            
             np.savez("tmp/motion.npz", **log)
+            print(f"[INFO]: Motion npz file saved locally to tmp/motion.npz")
 
-            import wandb
+            # Upload to wandb
+            try:
+                import wandb
 
-            COLLECTION = args_cli.output_name
-            run = wandb.init(project="csv_to_npz", name=COLLECTION)
-            # print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
-            REGISTRY = "motions"
-            logged_artifact = run.log_artifact(artifact_or_path="tmp/motion.npz", name=COLLECTION, type=REGISTRY)
-            run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
-            print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+                COLLECTION = args_cli.output_name
+                run = wandb.init(project="pkl_to_npz", name=COLLECTION)
+                print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
+                
+                REGISTRY = "motions"
+                logged_artifact = run.log_artifact(artifact_or_path="tmp/motion.npz", name=COLLECTION, type=REGISTRY)
+                run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
+                print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+                run.finish()
+            except ImportError:
+                print("[WARNING]: wandb not installed, skipping upload to wandb")
+            except Exception as e:
+                print(f"[WARNING]: Failed to upload to wandb: {e}")
 
 
 def main():
