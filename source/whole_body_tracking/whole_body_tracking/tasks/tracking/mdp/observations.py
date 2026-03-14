@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from isaaclab.utils.math import matrix_from_quat, subtract_frame_transforms
 
 from whole_body_tracking.tasks.tracking.mdp.commands import MotionCommand
+from whole_body_tracking.plugins.compliance import proxies
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -81,3 +82,22 @@ def motion_anchor_ori_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor
     )
     mat = matrix_from_quat(ori)
     return mat[..., :2].reshape(mat.shape[0], -1)
+
+
+def compliance_effort_proxy(env: ManagerBasedEnv) -> torch.Tensor:
+    """Observable effort proxy based on applied joint torques."""
+    torque = env.scene["robot"].data.applied_torque
+    effort, _ = proxies.effort_proxy(torque)
+    return effort.unsqueeze(-1)
+
+
+def compliance_impact_proxy(env: ManagerBasedEnv) -> torch.Tensor:
+    """Privileged impact proxy based on contact force if available."""
+    contact = env.scene.sensors.get("contact_forces", None)
+    if contact is None:
+        joint_acc = env.scene["robot"].data.joint_acc
+        proxy = proxies.impact_proxy(None, joint_acc, None)
+    else:
+        net_forces = contact.data.net_forces_w.reshape(env.num_envs, -1, 3)
+        proxy = proxies.impact_proxy(net_forces, None, None)
+    return proxy.unsqueeze(-1)

@@ -1,0 +1,4 @@
+mode: impedance
+alpha_lpf: 0.2
+rate_limit: 0.1
+safety_fallback: true
