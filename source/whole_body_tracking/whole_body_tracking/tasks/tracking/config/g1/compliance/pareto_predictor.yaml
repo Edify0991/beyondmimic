@@ -1,0 +1,5 @@
+hidden_dim: 256
+predict_variance: false
+optimizer:
+  lr: 0.0003
+  weight_decay: 0.00001

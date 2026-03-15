@@ -133,6 +133,17 @@ class ObservationsCfg:
             self.concatenate_terms = True
 
     @configclass
+    class ComplianceLoggingCfg(ObsGroup):
+        """Optional non-policy observation group for compliance logging."""
+
+        effort_proxy = ObsTerm(func=mdp.compliance_effort_proxy)
+        impact_proxy = ObsTerm(func=mdp.compliance_impact_proxy)
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    @configclass
     class PrivilegedCfg(ObsGroup):
         command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
         motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
@@ -148,6 +159,19 @@ class ObservationsCfg:
     # observation groups
     policy: PolicyCfg = PolicyCfg()
     critic: PrivilegedCfg = PrivilegedCfg()
+    compliance: ComplianceLoggingCfg = ComplianceLoggingCfg()
+
+
+@configclass
+class CompliancePluginCfg:
+    """Optional compliance extension toggles."""
+
+    enable: bool = False
+    collect_privileged: bool = False
+    enable_teacher_head: bool = False
+    enable_student_head: bool = False
+    window_size: int = 32
+    log_buffers: bool = False
 
 
 @configclass
@@ -305,6 +329,7 @@ class TrackingEnvCfg(ManagerBasedRLEnvCfg):
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
+    compliance: CompliancePluginCfg = CompliancePluginCfg()
 
     def __post_init__(self):
         """Post initialization."""
