@@ -23,8 +23,8 @@ parser.add_argument("--motion_file", type=str, default=None, help="Path to the m
 parser.add_argument("--enable_compliance_plugin", action="store_true", default=False, help="Enable compliance plugin integration.")
 parser.add_argument("--compliance_mode", type=str, default="off", choices=["off", "teacher", "student", "adapter"], help="Compliance runtime mode.")
 
-parser.add_argument("--checkpoint", type=str, default=None, help="Path to local model checkpoint file.")
-parser.add_argument("--wandb_path", type=str, default=None, help="WandB run path (optional, for loading from wandb).")
+# parser.add_argument("--checkpoint", type=str, default=None, help="Path to local model checkpoint file.")
+# parser.add_argument("--wandb_path", type=str, default=None, help="WandB run path (optional, for loading from wandb).")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -131,7 +131,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         if args_cli.motion_file is not None:
             env_cfg.commands.motion.motion_file = os.path.abspath(args_cli.motion_file)
-            
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
