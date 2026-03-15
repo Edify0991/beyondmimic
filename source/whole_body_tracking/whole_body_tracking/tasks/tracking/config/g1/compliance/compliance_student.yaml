@@ -1,0 +1,8 @@
+latent_dim: 64
+loss_weights:
+  L_student_z: 1.0
+  L_student_KL: 0.5
+  L_feat: 0.1
+  L_roll: 0.0
+export:
+  torchscript_name: compliance_student.ts

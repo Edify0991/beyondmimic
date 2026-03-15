@@ -1,0 +1,16 @@
+num_experts: 4
+prototype_dim: 64
+hard_top1: false
+temperature: 0.2
+loss_weights:
+  L_opt: 1.0
+  L_ctr: 0.2
+  L_ortho: 0.05
+  L_bal: 0.05
+  L_gate: 0.1
+z_bounds:
+  omega: [2.0, 40.0]
+  zeta: [0.2, 2.0]
+  epsilon: [0.0, 0.25]
+  alpha: [0.1, 1.0]
+  beta: [0.0, 1.0]
