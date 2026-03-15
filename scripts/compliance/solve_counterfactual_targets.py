@@ -30,6 +30,12 @@ def _load_yaml(path: str | None) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
+import h5py
+import torch
+
+from whole_body_tracking.plugins.compliance.counterfactual_solver import CounterfactualSolver
+from whole_body_tracking.plugins.compliance.pareto_predictor import ParetoPredictor
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Solve counterfactual z* targets.")
