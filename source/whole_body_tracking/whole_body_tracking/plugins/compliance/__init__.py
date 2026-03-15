@@ -7,6 +7,7 @@ from .observable_encoder import ObservableHistoryEncoder
 from .pareto_predictor import ParetoPredictor
 from .privileged_encoder import PrivilegedHistoryEncoder
 from .teacher_student_distill import ObservableStudentHead, distillation_losses
+from .rollout_logger import ComplianceRolloutLogger, RolloutLoggerCfg
 
 __all__ = [
     "ComplianceMoE",
@@ -17,4 +18,6 @@ __all__ = [
     "PrivilegedHistoryEncoder",
     "ObservableStudentHead",
     "distillation_losses",
+    "ComplianceRolloutLogger",
+    "RolloutLoggerCfg",
 ]

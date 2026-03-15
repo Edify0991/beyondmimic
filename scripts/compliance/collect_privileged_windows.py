@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Collect privileged jump windows from raw rollout HDF5 or synthetic fallback."""
 """Collect jump-centric observable/privileged windows and tag jump events.
 
 This week-1 utility supports either:
@@ -22,141 +23,194 @@ def _parse_csv_list(text: str) -> list[str]:
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
-def _load_or_generate(args: argparse.Namespace) -> dict[str, np.ndarray]:
-    if args.input_npz:
-        data = dict(np.load(args.input_npz))
-        if "contact" not in data:
-            data["contact"] = (data.get("contact_force", np.zeros((data["q"].shape[0], data["q"].shape[1]))) > 5.0).astype(np.float32)
-        return data
+def _load_raw_h5(path: str) -> dict[str, np.ndarray]:
+    import h5py
 
-    # Synthetic fallback for week-1 dry-runs when simulator integration is unavailable.
-    n_env = args.num_envs
-    t = 240
+    with h5py.File(path, "r") as f:
+        data = {
+            "sim_step": np.asarray(f["/time/sim_step"]),
+            "env_id": np.asarray(f["/meta/env_id"]),
+            "episode_id": np.asarray(f["/meta/episode_id"]),
+            "q": np.asarray(f["/joint/q"]),
+            "dq": np.asarray(f["/joint/dq"]),
+            "q_des": np.asarray(f["/joint/q_des"]),
+            "action": np.asarray(f["/joint/action_pi"]),
+            "tau_cmd": np.asarray(f["/joint/tau_cmd"]),
+            "effort_proxy": np.asarray(f["/joint/effort_proxy"]),
+            "root_pos": np.asarray(f["/root/pos"]),
+            "root_lin_vel": np.asarray(f["/root/lin_vel"]),
+            "imu_torso": np.asarray(f["/imu/torso"]),
+            "contact_bool": np.asarray(f["/contact/bool"]),
+            "contact_force": np.asarray(f["/contact/force"]),
+            "payload_acc": np.asarray(f["/payload/acc"]),
+            "payload_vel": np.asarray(f["/payload/vel"]),
+        }
+    return data
+
+
+def _reshape_sequences(data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    env_ids = data["env_id"].astype(int)
+    unique_env = np.unique(env_ids)
+    seq = {}
+    for key, val in data.items():
+        if key in {"env_id", "episode_id", "sim_step"}:
+            continue
+        chunks = [val[env_ids == e] for e in unique_env]
+        min_t = min(c.shape[0] for c in chunks)
+        chunks = [c[:min_t] for c in chunks]
+        seq[key] = np.stack(chunks, axis=0)
+    return seq
+
+
+def _synthetic(args: argparse.Namespace) -> dict[str, np.ndarray]:
+    n_env, t = args.num_envs, 240
     tt = np.linspace(0.0, 1.0, t)
-    contact = np.ones((n_env, t), dtype=np.float32)
-    contact[:, 70:130] = 0.0
-    contact[:, 130:140] = 1.0
-    base_height = (0.95 + 0.15 * np.exp(-((tt - 0.45) / 0.12) ** 2))[None, :].repeat(n_env, axis=0)
-    base_vz = np.gradient(base_height, axis=1)
-    contact_force = contact * (60 + 200 * np.exp(-((tt - 0.58) / 0.02) ** 2))[None, :]
-    payload_vib = 0.15 + 0.3 * np.exp(-((tt - 0.6) / 0.07) ** 2)[None, :].repeat(n_env, axis=0)
-    track_err = 0.05 + 0.08 * np.exp(-((tt - 0.6) / 0.08) ** 2)[None, :].repeat(n_env, axis=0)
-    effort = 0.3 + 0.25 * np.exp(-((tt - 0.55) / 0.09) ** 2)[None, :].repeat(n_env, axis=0)
+    contact = np.ones((n_env, t, 1), dtype=np.float32)
+    contact[:, 70:130] = 0
+    contact[:, 130:140] = 1
+    root_pos = np.zeros((n_env, t, 3), dtype=np.float32)
+    root_pos[..., 2] = 0.95 + 0.15 * np.exp(-((tt - 0.45) / 0.12) ** 2)
+    root_lin_vel = np.gradient(root_pos, axis=1)
     q = np.zeros((n_env, t, 29), dtype=np.float32)
     dq = np.zeros((n_env, t, 29), dtype=np.float32)
     q_des = np.zeros((n_env, t, 29), dtype=np.float32)
     action = np.zeros((n_env, t, 29), dtype=np.float32)
+    tau = np.zeros((n_env, t, 29), dtype=np.float32)
+    effort = np.mean(np.abs(tau), axis=-1, keepdims=True)
+    force = contact * (60 + 200 * np.exp(-((tt - 0.58) / 0.02) ** 2))[None, :, None]
+    payload_acc = np.repeat(0.2 * np.exp(-((tt - 0.6) / 0.05) ** 2)[None, :, None], n_env, axis=0)
+    payload_vel = np.cumsum(payload_acc, axis=1)
+    imu_torso = np.concatenate([root_lin_vel, np.zeros_like(root_lin_vel)], axis=-1)
     return {
         "q": q,
         "dq": dq,
         "q_des": q_des,
         "action": action,
-        "contact": contact,
-        "contact_force": contact_force,
-        "base_vz": base_vz,
-        "base_height": base_height,
-        "payload_vibration_proxy": payload_vib,
-        "tracking_error": track_err,
+        "tau_cmd": tau,
         "effort_proxy": effort,
+        "root_pos": root_pos,
+        "root_lin_vel": root_lin_vel,
+        "imu_torso": imu_torso,
+        "contact_bool": contact,
+        "contact_force": force,
+        "payload_acc": payload_acc,
+        "payload_vel": payload_vel,
     }
 
 
-def _tag_events(contact: np.ndarray, base_vz: np.ndarray, base_height: np.ndarray, cfg: dict[str, float]) -> np.ndarray:
-    """Tag each timestep with a jump-phase event ID.
-
-    Default assumptions:
-    - aerial when contact is false and vertical speed exceeds threshold magnitude,
-    - landing anchored on first touchdown after aerial,
-    - pre_landing is a configurable window before landing,
-    - post_landing_recovery is a configurable window after landing.
-    """
+def _tag_events(contact: np.ndarray, root_vz: np.ndarray, root_z: np.ndarray, cfg: dict[str, float]) -> np.ndarray:
     n_env, t = contact.shape
     labels = np.full((n_env, t), EVENT_TO_ID["pre_takeoff"], dtype=np.int64)
-    vz_thr = cfg["vz_threshold"]
-    pre_land = int(cfg["pre_landing_steps"])
-    post_land = int(cfg["post_landing_steps"])
     for e in range(n_env):
         c = contact[e] > 0.5
-        vz = base_vz[e]
-        h = base_height[e]
-
-        airborne = (~c) & (np.abs(vz) >= vz_thr)
-        labels[e, airborne] = EVENT_TO_ID["aerial"]
-
-        touchdown_idx = None
-        aerial_idx = np.where(airborne)[0]
-        if aerial_idx.size > 0:
+        aerial = (~c) & (np.abs(root_vz[e]) > cfg["vz_threshold"])
+        labels[e, aerial] = EVENT_TO_ID["aerial"]
+        aerial_idx = np.where(aerial)[0]
+        touchdown = None
+        if len(aerial_idx) > 0:
             after = np.where(c & (np.arange(t) > aerial_idx[-1]))[0]
-            if after.size > 0:
-                touchdown_idx = int(after[0])
-
-        if touchdown_idx is not None:
-            s = max(0, touchdown_idx - pre_land)
-            labels[e, s:touchdown_idx] = EVENT_TO_ID["pre_landing"]
-            labels[e, touchdown_idx : min(t, touchdown_idx + 2)] = EVENT_TO_ID["landing"]
-            labels[e, touchdown_idx + 2 : min(t, touchdown_idx + 2 + post_land)] = EVENT_TO_ID["post_landing_recovery"]
-
-        # extra heuristic: if height is below a soft bound and in contact late, treat as recovery
-        low_height = h < cfg["recovery_height_max"]
-        labels[e, low_height & c & (np.arange(t) > (touchdown_idx or 0))] = EVENT_TO_ID["post_landing_recovery"]
-
+            if len(after) > 0:
+                touchdown = int(after[0])
+        if touchdown is not None:
+            s = max(0, touchdown - int(cfg["pre_landing_steps"]))
+            labels[e, s:touchdown] = EVENT_TO_ID["pre_landing"]
+            labels[e, touchdown : min(t, touchdown + 2)] = EVENT_TO_ID["landing"]
+            labels[e, touchdown + 2 : min(t, touchdown + 2 + int(cfg["post_landing_steps"]))] = EVENT_TO_ID[
+                "post_landing_recovery"
+            ]
+        labels[e, (root_z[e] < cfg["recovery_height_max"]) & c] = EVENT_TO_ID["post_landing_recovery"]
     return labels
 
 
-def _window_data(data: dict[str, np.ndarray], labels: np.ndarray, window: int, stride: int) -> dict[str, np.ndarray]:
-    keys = ["q", "dq", "q_des", "action", "contact_force", "payload_vibration_proxy", "tracking_error", "effort_proxy"]
-    keys = [k for k in keys if k in data]
-    n_env, t = labels.shape
-    out = {k: [] for k in keys}
-    out["event_label"] = []
-    out["event_name"] = []
+def _psd_ratio(signal: np.ndarray, fs: float = 50.0) -> np.ndarray:
+    x = signal - signal.mean(axis=-1, keepdims=True)
+    spec = np.abs(np.fft.rfft(x, axis=-1)) ** 2
+    freq = np.fft.rfftfreq(x.shape[-1], d=1.0 / fs)
+    low = spec[..., (freq >= 0) & (freq < 5)].mean(axis=-1)
+    high = spec[..., (freq >= 5) & (freq <= 20)].mean(axis=-1)
+    return high / (low + 1e-6)
 
+
+def _window(seq: dict[str, np.ndarray], labels: np.ndarray, window: int, stride: int) -> dict[str, np.ndarray]:
+    out = {k: [] for k in ["q", "dq", "q_des", "action", "tau_cmd", "effort_proxy", "impact_proxy", "oscillation_proxy", "payload_vibration_proxy", "contact_force", "contact_bool", "event_label", "event_name"]}
+    n_env, t = labels.shape
     for e in range(n_env):
         for end in range(window, t + 1, stride):
             start = end - window
             mid = (start + end) // 2
-            ev_id = int(labels[e, mid])
-            for k in keys:
-                v = data[k]
-                if v.ndim == 3:
-                    out[k].append(v[e, start:end])
-                else:
-                    out[k].append(v[e, start:end, None])
-            out["event_label"].append(ev_id)
-            out["event_name"].append(EVENT_NAMES[ev_id])
+            ev = int(labels[e, mid])
+            q = seq["q"][e, start:end]
+            dq = seq["dq"][e, start:end]
+            q_des = seq["q_des"][e, start:end]
+            action = seq["action"][e, start:end]
+            tau = seq["tau_cmd"][e, start:end]
+            effort = seq["effort_proxy"][e, start:end]
+            cf = seq["contact_force"][e, start:end]
+            cb = seq["contact_bool"][e, start:end]
+            # proxies
+            if np.isfinite(cf).any() and np.abs(cf).sum() > 0:
+                impact = np.max(np.abs(cf), axis=(0, 1), keepdims=True)
+            else:
+                ddq = np.diff(dq, axis=0)
+                impact = np.max(np.abs(ddq), axis=(0, 1), keepdims=True)
+                if not np.isfinite(impact).all():
+                    imu = seq["imu_torso"][e, start:end, :3]
+                    impact = np.sqrt(np.mean(np.diff(imu, axis=0) ** 2, keepdims=True))
+            osc = _psd_ratio(dq.T).mean(keepdims=True)
+            if "payload_acc" in seq:
+                pa = seq["payload_acc"][e, start:end]
+            else:
+                pa = np.diff(seq["payload_vel"][e, start:end], axis=0, prepend=seq["payload_vel"][e, start : start + 1])
+            payload_vib = np.sqrt(np.mean((pa - pa.mean(axis=0, keepdims=True)) ** 2, axis=(0, 1), keepdims=True))
 
-    for k, v in out.items():
+            out["q"].append(q)
+            out["dq"].append(dq)
+            out["q_des"].append(q_des)
+            out["action"].append(action)
+            out["tau_cmd"].append(tau)
+            out["effort_proxy"].append(effort)
+            out["impact_proxy"].append(np.asarray(impact).reshape(1, 1))
+            out["oscillation_proxy"].append(np.asarray(osc).reshape(1, 1))
+            out["payload_vibration_proxy"].append(np.asarray(payload_vib).reshape(1, 1))
+            out["contact_force"].append(cf)
+            out["contact_bool"].append(cb)
+            out["event_label"].append(ev)
+            out["event_name"].append(EVENT_NAMES[ev])
+
+    for k in out:
         if k == "event_name":
-            out[k] = np.asarray(v, dtype="S32")
+            out[k] = np.asarray(out[k], dtype="S32")
         else:
-            out[k] = np.asarray(v)
+            out[k] = np.asarray(out[k])
     return out
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect privileged jump windows and event labels.")
+    parser = argparse.ArgumentParser(description="Collect privileged windows from raw rollout data.")
     parser.add_argument("--task", default=None)
     parser.add_argument("--wandb_path", default=None)
-    parser.add_argument("--input_npz", default=None, help="Optional local rollout npz for offline processing.")
+    parser.add_argument("--raw_h5", default=None, help="Path to raw_rollouts.h5")
     parser.add_argument("--window_size", type=int, default=20)
     parser.add_argument("--stride", type=int, default=2)
     parser.add_argument("--event_types", default="pre_landing,landing,aerial,post_landing_recovery")
     parser.add_argument("--num_envs", type=int, default=32)
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--out_file", required=True)
-
-    # configurable detection parameters
+    parser.add_argument("--out_file", default="outputs/datasets/jump_privileged_windows.h5")
     parser.add_argument("--vz_threshold", type=float, default=0.015)
     parser.add_argument("--pre_landing_steps", type=int, default=6)
     parser.add_argument("--post_landing_steps", type=int, default=18)
     parser.add_argument("--recovery_height_max", type=float, default=1.05)
     args = parser.parse_args()
 
-    data = _load_or_generate(args)
+    if args.raw_h5:
+        seq = _reshape_sequences(_load_raw_h5(args.raw_h5))
+    else:
+        seq = _synthetic(args)
+
     labels = _tag_events(
-        data["contact"],
-        data["base_vz"],
-        data["base_height"],
+        seq["contact_bool"].squeeze(-1),
+        seq["root_lin_vel"][..., 2],
+        seq["root_pos"][..., 2],
         {
             "vz_threshold": args.vz_threshold,
             "pre_landing_steps": args.pre_landing_steps,
@@ -164,8 +218,8 @@ def main() -> None:
             "recovery_height_max": args.recovery_height_max,
         },
     )
-    windows = _window_data(data, labels, args.window_size, args.stride)
 
+    windows = _window(seq, labels, args.window_size, args.stride)
     selected = set(_parse_csv_list(args.event_types))
     keep = np.array([name.decode("utf-8") in selected for name in windows["event_name"]], dtype=bool)
     for k in list(windows.keys()):
@@ -173,10 +227,7 @@ def main() -> None:
 
     out_path = Path(args.out_file)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import h5py
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("h5py is required to write HDF5 outputs. Please install h5py.") from exc
+    import h5py
 
     with h5py.File(out_path, "w") as f:
         for k, v in windows.items():
@@ -184,6 +235,7 @@ def main() -> None:
         f.create_dataset("event_names", data=np.asarray(EVENT_NAMES, dtype="S32"))
         f.attrs["task"] = args.task or "unknown"
         f.attrs["wandb_path"] = args.wandb_path or "none"
+        f.attrs["source_raw_h5"] = args.raw_h5 or "synthetic"
 
     print(f"[INFO] Saved {len(windows['event_label'])} windows to {out_path}")
 
