@@ -29,12 +29,6 @@ def _load_yaml(path: str | None) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-import torch
-import torch.nn.functional as F
-
-from whole_body_tracking.plugins.compliance.compliance_moe import ComplianceMoE
-from whole_body_tracking.plugins.compliance.privileged_encoder import PrivilegedHistoryEncoder
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train privileged MoE teacher.")

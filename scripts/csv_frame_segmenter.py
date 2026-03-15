@@ -373,6 +373,7 @@ def main() -> None:
     elif args.interactive:
         _interactive_loop_terminal(data, out_csv, start, end, max(1, args.step_size))
     else:
+        _save_segment(data, start, end, out_csv)
         if args.transition_frames > 0:
             default_pose = get_g1_default_pose()
             _save_segment_with_transition(data, start, end, out_csv, default_pose, args.transition_frames)

@@ -92,7 +92,13 @@ def compliance_effort_proxy(env: ManagerBasedEnv) -> torch.Tensor:
 
 
 def compliance_impact_proxy(env: ManagerBasedEnv) -> torch.Tensor:
-    """Privileged impact proxy based on contact force if available."""
+    """Privileged impact proxy reduced to shape (num_envs, 1).
+
+    Note:
+        Observation groups with ``concatenate_terms=True`` require term tensors to have
+        compatible ranks. For contact-based proxies, reduce body-wise values to a single
+        scalar per environment.
+    """
     contact = env.scene.sensors.get("contact_forces", None)
     if contact is None:
         joint_acc = env.scene["robot"].data.joint_acc
@@ -100,4 +106,7 @@ def compliance_impact_proxy(env: ManagerBasedEnv) -> torch.Tensor:
     else:
         net_forces = contact.data.net_forces_w.reshape(env.num_envs, -1, 3)
         proxy = proxies.impact_proxy(net_forces, None, None)
+
+    if proxy.ndim > 1:
+        proxy = proxy.mean(dim=-1)
     return proxy.unsqueeze(-1)
