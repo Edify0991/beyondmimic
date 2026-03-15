@@ -20,6 +20,15 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
+parser.add_argument("--enable_compliance_plugin", action="store_true", default=False, help="Enable compliance plugin integration.")
+parser.add_argument("--compliance_mode", type=str, default="off", choices=["off", "teacher", "student", "adapter"], help="Compliance runtime mode.")
+parser.add_argument("--compliance_log_rollouts", action="store_true", default=False, help="Enable raw compliance rollout logging.")
+parser.add_argument("--compliance_save_dir", type=str, default="outputs/rollouts/default", help="Directory to save raw rollout h5.")
+parser.add_argument("--payload_body_names", type=str, default="", help="Comma-separated payload body names.")
+parser.add_argument("--payload_site_names", type=str, default="", help="Comma-separated payload site names.")
+parser.add_argument("--torso_reference_body_name", type=str, default="torso_link", help="Torso reference body name for relative payload motion.")
+parser.add_argument("--compliance_joint_names", type=str, default="", help="Comma-separated joint names to log; empty logs all joints.")
+parser.add_argument("--max_steps", type=int, default=0, help="Optional maximum rollout steps (0 means unlimited).")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -60,6 +69,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
+from whole_body_tracking.plugins.compliance.rollout_logger import ComplianceRolloutLogger, RolloutLoggerCfg
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -67,6 +77,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     """Play with RSL-RL agent."""
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if hasattr(env_cfg, "compliance") and args_cli.enable_compliance_plugin:
+        env_cfg.compliance.enable = True
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -156,6 +168,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs, _ = env.get_observations()
     timestep = 0
+
+    logger = None
+    if args_cli.compliance_log_rollouts:
+        motion_name = os.path.basename(env_cfg.commands.motion.motion_file) if hasattr(env_cfg.commands.motion, "motion_file") else "unknown"
+        run_tag = os.path.basename(os.path.dirname(resume_path)) or "play"
+        save_path = os.path.join(args_cli.compliance_save_dir, "raw_rollouts.h5")
+        logger = ComplianceRolloutLogger(
+            env.unwrapped,
+            RolloutLoggerCfg(
+                save_path=save_path,
+                task_name=args_cli.task or "unknown",
+                motion_name=motion_name,
+                seed=int(getattr(agent_cfg, "seed", 0) or 0),
+                run_id=run_tag,
+                selected_joint_names=[x.strip() for x in args_cli.compliance_joint_names.split(",") if x.strip()],
+                payload_body_names=[x.strip() for x in args_cli.payload_body_names.split(",") if x.strip()],
+                payload_site_names=[x.strip() for x in args_cli.payload_site_names.split(",") if x.strip()],
+                torso_reference_body_name=args_cli.torso_reference_body_name,
+            ),
+        )
+        print(f"[INFO] Compliance raw rollout logging enabled: {save_path}")
     # simulate environment
     while simulation_app.is_running():
         # run everything in inference mode
@@ -165,13 +198,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if actions.ndim == 1:
                 actions = actions[None, :]  # 增加 batch 维度，变成 shape [1, 29]
             # env stepping
-            obs, _, _, _ = env.step(actions)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
-                break
+            obs, _, dones, infos = env.step(actions)
+            if logger is not None:
+                logger.append_step(actions, dones)
+        timestep += 1
+        if args_cli.video and timestep == args_cli.video_length:
+            break
+        if args_cli.max_steps > 0 and timestep >= args_cli.max_steps:
+            break
 
+    if logger is not None:
+        logger.close()
     # close the simulator
     env.close()
 

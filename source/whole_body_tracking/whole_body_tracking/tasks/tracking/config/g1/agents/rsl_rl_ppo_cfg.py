@@ -15,6 +15,12 @@ class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
     )
+    compliance_plugin = {
+        "enabled": False,
+        "teacher_head": False,
+        "student_head": False,
+        "log_buffers": False,
+    }
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
