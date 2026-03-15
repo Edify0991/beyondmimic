@@ -22,6 +22,10 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
 parser.add_argument("--enable_compliance_plugin", action="store_true", default=False, help="Enable compliance plugin integration.")
 parser.add_argument("--compliance_mode", type=str, default="off", choices=["off", "teacher", "student", "adapter"], help="Compliance runtime mode.")
+
+parser.add_argument("--checkpoint", type=str, default=None, help="Path to local model checkpoint file.")
+parser.add_argument("--wandb_path", type=str, default=None, help="WandB run path (optional, for loading from wandb).")
+
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -76,7 +80,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
 
-    if args_cli.wandb_path:
+    # --- Load model from local or wandb ---
+    if args_cli.checkpoint:
+        # Load from local checkpoint
+        resume_path = os.path.abspath(args_cli.checkpoint)
+        print(f"[INFO]: Loading model checkpoint from local: {resume_path}")
+
+        # Load motion from local file if specified
+        if args_cli.motion_file is not None:
+            env_cfg.commands.motion.motion_file = os.path.abspath(args_cli.motion_file)
+            print(f"[INFO]: Using local motion file: {env_cfg.commands.motion.motion_file}")
+
+    elif args_cli.wandb_path:
         import wandb
 
         run_path = args_cli.wandb_path
@@ -114,6 +129,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
+        if args_cli.motion_file is not None:
+            env_cfg.commands.motion.motion_file = os.path.abspath(args_cli.motion_file)
+            
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
