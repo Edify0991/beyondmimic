@@ -63,6 +63,56 @@ def _print_frame_preview(data: np.ndarray, frame_idx: int) -> None:
         f"root_quat(xyzw)={np.array2string(root_quat, precision=4)}"
     )
 
+def _save_segment_with_transition(
+    data: np.ndarray,
+    start: int,
+    end: int,
+    out_csv: Path,
+    default_pose: np.ndarray | None = None,
+    transition_frames: int = 15,
+) -> None:
+    """Save segment with smooth transition from default pose to first frame.
+
+    Args:
+        data: full motion data array.
+        start: start frame index.
+        end: end frame index.
+        out_csv: output csv path.
+        default_pose: default standing pose (same dim as data row). If None, use first frame directly.
+        transition_frames: number of frames for blending transition.
+    """
+    if start > end:
+        start, end = end, start
+    seg = data[start : end + 1]
+
+    if default_pose is not None and transition_frames > 0:
+        # Linear interpolation from default_pose to seg[0]
+        blend = np.linspace(0.0, 1.0, transition_frames + 1)[1:]  # exclude 0.0
+        transition = np.array([
+            default_pose * (1.0 - t) + seg[0] * t for t in blend
+        ])
+        # For quaternion columns (3:7), renormalize
+        quat_cols = slice(3, 7)
+        norms = np.linalg.norm(transition[:, quat_cols], axis=1, keepdims=True)
+        transition[:, quat_cols] /= np.maximum(norms, 1e-8)
+
+        seg = np.concatenate([transition, seg], axis=0)
+        print(f"[INFO] added {transition_frames} transition frames from default pose")
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(out_csv, seg, delimiter=",", fmt="%.10f")
+    print(f"[INFO] saved segment: {out_csv} (frames {start}..{end} + {transition_frames} transition, total={len(seg)})")
+
+def get_g1_default_pose() -> np.ndarray:
+    """Returns the G1 robot default standing pose in CSV format.
+
+    Format: [root_pos_xyz(3), root_quat_xyzw(4), joint_pos(29)]
+    """
+    # G1 default: standing upright, root at origin, identity quaternion
+    root_pos = np.array([0.0, 0.0, 0.793])       # G1 standing height ~0.793m
+    root_quat_xyzw = np.array([0.0, 0.0, 0.0, 1.0])  # identity quaternion
+    joint_pos = np.zeros(len(JOINT_NAMES))         # all joints at zero
+    return np.concatenate([root_pos, root_quat_xyzw, joint_pos])
 
 def _save_segment(data: np.ndarray, start: int, end: int, out_csv: Path) -> None:
     if start > end:
@@ -86,6 +136,7 @@ def _interactive_commands_help() -> None:
     print("  e                 -> mark end = current")
     print("  i                 -> print info")
     print("  w                 -> write current [start,end] to output csv")
+    print("  wt <n>            -> write with <n> transition frames from default pose")
     print("  q                 -> quit")
     print("---------------------------")
 
@@ -143,6 +194,9 @@ def _interactive_loop_terminal(data: np.ndarray, out_csv: Path, init_start: int,
             _print_frame_preview(data, cur)
         elif cmd == "w":
             _save_segment(data, start, end, out_csv)
+        elif cmd == "wt" and val is not None:
+            default_pose = get_g1_default_pose()
+            _save_segment_with_transition(data, start, end, out_csv, default_pose, transition_frames=val)
         elif cmd == "q":
             print("[INFO] quit without additional save.")
             break
@@ -296,6 +350,7 @@ def main() -> None:
     parser.add_argument("--start_frame", type=int, default=0, help="Start frame index (0-based).")
     parser.add_argument("--end_frame", type=int, default=-1, help="End frame index (0-based, inclusive).")
     parser.add_argument("--step_size", type=int, default=1, help="Default step for n/p in interactive mode.")
+    parser.add_argument("--transition_frames", type=int, default=0, help="Number of transition frames from default pose to first motion frame.")
     args, unknown = parser.parse_known_args()
 
     input_csv = Path(args.input_csv)
@@ -318,7 +373,11 @@ def main() -> None:
     elif args.interactive:
         _interactive_loop_terminal(data, out_csv, start, end, max(1, args.step_size))
     else:
-        _save_segment(data, start, end, out_csv)
+        if args.transition_frames > 0:
+            default_pose = get_g1_default_pose()
+            _save_segment_with_transition(data, start, end, out_csv, default_pose, args.transition_frames)
+        else:
+            _save_segment(data, start, end, out_csv)
 
 
 if __name__ == "__main__":
