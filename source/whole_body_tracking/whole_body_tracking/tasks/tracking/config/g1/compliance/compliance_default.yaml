@@ -1,0 +1,8 @@
+enabled: false
+collect_privileged: false
+enable_teacher: false
+enable_student: false
+window_size: 32
+logging:
+  enabled: false
+  save_hdf5: true
