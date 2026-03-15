@@ -80,3 +80,19 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
     last_contact_time = contact_sensor.data.last_contact_time[:, sensor_cfg.body_ids]
     reward = torch.sum((last_contact_time < threshold) * first_air, dim=-1)
     return reward
+
+
+
+def compliance_impact_penalty(env: ManagerBasedRLEnv, scale: float = 1.0) -> torch.Tensor:
+    """Optional penalty term used by compliance plugin experiments."""
+    contact: ContactSensor | None = env.scene.sensors.get("contact_forces", None)
+    if contact is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    force = contact.data.net_forces_w.reshape(env.num_envs, -1, 3)
+    return -scale * force.norm(dim=-1).mean(dim=-1)
+
+
+def compliance_effort_penalty(env: ManagerBasedRLEnv, scale: float = 1.0) -> torch.Tensor:
+    """Optional effort penalty from absolute applied torque."""
+    torque = env.scene["robot"].data.applied_torque
+    return -scale * torque.abs().mean(dim=-1)

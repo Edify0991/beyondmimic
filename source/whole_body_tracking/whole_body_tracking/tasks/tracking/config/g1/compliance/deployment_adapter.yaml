@@ -1,0 +1,9 @@
+mode: impedance
+alpha_lpf: 0.2
+rate_limit: 0.1
+safety_fallback: true
+omega_grid: [18.0, 24.0, 30.0]
+zeta_grid: [0.6, 1.0, 1.4]
+alpha_grid: [0.6, 0.8, 1.0]
+epsilon_fixed: 0.05
+beta_fixed: 0.05
