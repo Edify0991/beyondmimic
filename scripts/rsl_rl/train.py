@@ -24,12 +24,10 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-# parser.add_argument("--registry_name", type=str, required=True, help="The name of the wand registry.")
+parser.add_argument("--registry_name", type=str, default=None, help="The name of the wand registry.")
+parser.add_argument("--motion_file", type=str, default=None, help="Path to a local motion npz. If set, skip wandb artifact fetch.")
 parser.add_argument("--enable_compliance_plugin", action="store_true", default=False, help="Enable compliance plugin integration.")
 parser.add_argument("--compliance_mode", type=str, default="off", choices=["off", "teacher", "student", "adapter"], help="Compliance runtime mode.")
-
-parser.add_argument("--motion_file", type=str, default=None, help="Path to local motion .npz file.")
-parser.add_argument("--registry_name", type=str, default=None, help="WandB registry name for motion (optional).")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -63,7 +61,34 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_pickle, dump_yaml
+try:
+    from isaaclab.utils.io import dump_pickle, dump_yaml
+except ImportError:
+    import json
+    import pickle
+
+    def _to_serializable(data):
+        if hasattr(data, "to_dict"):
+            return data.to_dict()
+        return data
+
+    def dump_yaml(path, data):
+        """Compatibility fallback for IsaacLab versions lacking dump_yaml."""
+        payload = _to_serializable(data)
+        try:
+            import yaml
+
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(payload, f, sort_keys=False)
+        except Exception:
+            # final fallback: write JSON text to keep params trace available
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(str(payload), f, ensure_ascii=False, indent=2)
+
+    def dump_pickle(path, data):
+        """Compatibility fallback for IsaacLab versions lacking dump_pickle."""
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -97,17 +122,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.compliance.collect_privileged = True
         env_cfg.compliance.log_buffers = True
 
-    # load the motion file from the wandb registry
+    # resolve motion source: local file takes precedence over wandb registry
     registry_name = args_cli.registry_name
-    if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-        registry_name += ":latest"
-    import pathlib
-
     if args_cli.motion_file is not None:
-        # 从本地文件加载 motion
-        env_cfg.commands.motion.motion_file = os.path.abspath(args_cli.motion_file)
-        print(f"[INFO]: Using local motion file: {env_cfg.commands.motion.motion_file}")
-    elif args_cli.registry_name is not None:
+        env_cfg.commands.motion.motion_file = args_cli.motion_file
+        registry_name = registry_name or "local_motion"
+        print(f"[INFO] Using local motion file: {env_cfg.commands.motion.motion_file}")
+    else:
+        if not registry_name:
+            raise ValueError("Either --motion_file or --registry_name must be provided.")
+        if ":" not in registry_name:  # append default alias
+            registry_name += ":latest"
+        import pathlib
         import wandb
 
         api = wandb.Api()
@@ -163,6 +189,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner.load(resume_path)
 
     # dump the configuration into log-directory
+    os.makedirs(os.path.join(log_dir, "params"), exist_ok=True)
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
     dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
