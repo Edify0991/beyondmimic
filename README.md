@@ -91,11 +91,38 @@ python scripts/csv_to_npz.py --input_file {motion_name}.csv --input_fps 30 --out
 
 This will automatically upload the processed motion file to the WandB registry with output name {motion_name}.
 
+Convert retargeted motions to include the maximum coordinates information (body pose, body velocity, and body
+acceleration) via forward kinematics. The processed motion file will be saved to `data/motions/` directory.
+
+```bash
+python scripts/csv_to_npz.py --input_file {motion_name}.csv --input_fps 30 --output_name {motion_name} --headless
+```
+
+Optionally, you can also upload the motion to WandB registry:
+
+```bash
+python scripts/csv_to_npz.py --input_file {motion_name}.csv --input_fps 30 --output_name {motion_name} --headless --upload_wandb
+```
+
+
 - Test if the WandB registry works properly by replaying the motion in Isaac Sim:
 
 ```bash
 python scripts/replay_npz.py --registry_name={your-organization}-org/wandb-registry-motions/{motion_name}
 ```
+
+**From local file:**
+
+```bash
+python scripts/replay_npz.py --motion_file=data/motions/{motion_name}.npz
+```
+
+**From WandB registry (optional):**
+
+```bash
+python scripts/replay_npz.py --registry_name={your-organization}-org/wandb-registry-motions/{motion_name}
+```
+
 
 - Debugging
     - Make sure to export WANDB_ENTITY to your organization name, not your personal username.
@@ -111,6 +138,27 @@ python scripts/rsl_rl/train.py --task=Tracking-Flat-G1-v0 \
 --headless --logger wandb --log_project_name {project_name} --run_name {run_name}
 ```
 
+**Using local motion file (recommended):**
+
+```bash
+python scripts/rsl_rl/train.py --task=Tracking-Flat-G1-v0 \
+  --motion_file data/motions/{motion_name}.npz \
+  --headless --logger wandb --log_project_name {project_name} --run_name {run_name}
+```
+
+Models and checkpoints will be saved to `logs/rsl_rl/{experiment_name}/` by default.
+
+**Using WandB registry motion (optional):**
+
+```bash
+python scripts/rsl_rl/train.py --task=Tracking-Flat-G1-v0 \
+  --registry_name {your-organization}-org/wandb-registry-motions/{motion_name} \
+  --headless --logger wandb --log_project_name {project_name} --run_name {run_name}
+```
+
+> **Note:** The `--logger wandb` flag enables wandb training curve visualization. Remove it to disable wandb logging entirely, or use `--logger tensorboard` for local-only logging.
+
+
 ### Policy Evaluation
 
 - Play the trained policy by the following command:
@@ -121,6 +169,28 @@ python scripts/rsl_rl/play.py --task=Tracking-Flat-G1-v0 --num_envs=2 --wandb_pa
 
 The WandB run path can be located in the run overview. It follows the format {your_organization}/{project_name}/ along
 with a unique 8-character identifier. Note that run_name is different from run_path.
+
+**From local checkpoint and local motion file (recommended):**
+
+```bash
+python scripts/rsl_rl/play.py --task=Tracking-Flat-G1-v0 --num_envs=2 \
+  --checkpoint logs/rsl_rl/{experiment_name}/{run_dir}/model.pt \
+  --motion_file data/motions/{motion_name}.npz
+```
+
+**From local log directory (auto-detect latest checkpoint):**
+
+```bash
+python scripts/rsl_rl/play.py --task=Tracking-Flat-G1-v0 --num_envs=2 \
+  --motion_file data/motions/{motion_name}.npz
+```
+
+**From WandB run path (optional):**
+
+```bash
+python scripts/rsl_rl/play.py --task=Tracking-Flat-G1-v0 --num_envs=2 \
+  --wandb_path={wandb-run-path}
+```
 
 ## Code Structure
 

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """Collect privileged jump windows from raw rollout HDF5 or synthetic fallback."""
+"""Collect jump-centric observable/privileged windows and tag jump events.
+
+This week-1 utility supports either:
+1) reading an existing rollout npz via --input_npz, or
+2) generating synthetic rollout-like traces for quick pipeline validation.
+"""
 
 from __future__ import annotations
 

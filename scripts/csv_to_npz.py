@@ -36,6 +36,7 @@ parser.add_argument("--output_fps", type=int, default=50, help="The fps of the o
 #     default="cpu",
 #     help="Device to run on, e.g., 'cpu', 'cuda:0', 'cuda:1', etc."
 # )
+parser.add_argument("--upload_wandb", action="store_true", default=False, help="Also upload motion to wandb registry.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -304,17 +305,35 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
             ):
                 log[k] = np.stack(log[k], axis=0)
 
-            np.savez("tmp/motion.npz", **log)
+            # np.savez("tmp/motion.npz", **log)
 
-            import wandb
+            # import wandb
 
-            COLLECTION = args_cli.output_name
-            run = wandb.init(project="csv_to_npz", name=COLLECTION)
-            # print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
-            REGISTRY = "motions"
-            logged_artifact = run.log_artifact(artifact_or_path="tmp/motion.npz", name=COLLECTION, type=REGISTRY)
-            run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
-            print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+            # COLLECTION = args_cli.output_name
+            # run = wandb.init(project="csv_to_npz", name=COLLECTION)
+            # # print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
+            # REGISTRY = "motions"
+            # logged_artifact = run.log_artifact(artifact_or_path="tmp/motion.npz", name=COLLECTION, type=REGISTRY)
+            # run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
+            # print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+
+            import os
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "motions")
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"{args_cli.output_name}.npz")
+            np.savez(output_path, **log)
+            print(f"[INFO]: Motion saved locally to: {output_path}")
+
+            # Optionally upload to wandb registry (controlled by --upload_wandb flag)
+            if args_cli.upload_wandb:
+                import wandb
+                COLLECTION = args_cli.output_name
+                run = wandb.init(project="csv_to_npz", name=COLLECTION)
+                REGISTRY = "motions"
+                logged_artifact = run.log_artifact(artifact_or_path=output_path, name=COLLECTION, type=REGISTRY)
+                run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
+                print(f"[INFO]: Motion also saved to wandb registry: {REGISTRY}/{COLLECTION}")
+                run.finish()
 
 
 def main():
