@@ -28,6 +28,9 @@ parser.add_argument("--registry_name", type=str, required=True, help="The name o
 parser.add_argument("--enable_compliance_plugin", action="store_true", default=False, help="Enable compliance plugin integration.")
 parser.add_argument("--compliance_mode", type=str, default="off", choices=["off", "teacher", "student", "adapter"], help="Compliance runtime mode.")
 
+parser.add_argument("--motion_file", type=str, default=None, help="Path to local motion .npz file.")
+parser.add_argument("--registry_name", type=str, default=None, help="WandB registry name for motion (optional).")
+
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -100,11 +103,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         registry_name += ":latest"
     import pathlib
 
-    import wandb
+    if args_cli.motion_file is not None:
+        # 从本地文件加载 motion
+        env_cfg.commands.motion.motion_file = os.path.abspath(args_cli.motion_file)
+        print(f"[INFO]: Using local motion file: {env_cfg.commands.motion.motion_file}")
+    elif args_cli.registry_name is not None:
+        import wandb
 
-    api = wandb.Api()
-    artifact = api.artifact(registry_name)
-    env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        api = wandb.Api()
+        artifact = api.artifact(registry_name)
+        env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        print(f"[INFO]: Using wandb registry motion: {args_cli.registry_name}")
+    else:
+        raise ValueError("Must provide either --motion_file or --registry_name for motion data.")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
