@@ -3,6 +3,7 @@
 
 Week-1 adds `--mode fixed_grid` for frozen base jump policy sweeps.
 """
+"""Evaluate baseline/teacher/student/plugin rollouts from logged trajectory files."""
 
 from __future__ import annotations
 
