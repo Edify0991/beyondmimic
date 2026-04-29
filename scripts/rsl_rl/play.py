@@ -3,6 +3,8 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import importlib.metadata as metadata
+import inspect
 import sys
 
 from isaaclab.app import AppLauncher
@@ -45,13 +47,20 @@ sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+try:
+    INSTALLED_RSL_RL_VERSION = metadata.version("rsl-rl-lib")
+except metadata.PackageNotFoundError:
+    INSTALLED_RSL_RL_VERSION = "0.0.0"
+
 """Rest everything follows."""
 
 import gymnasium as gym
 import os
 import pathlib
 import torch
+from packaging import version
 
+from rsl_rl.algorithms import PPO
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.envs import (
@@ -62,7 +71,7 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -72,10 +81,52 @@ from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_moti
 from whole_body_tracking.plugins.compliance.rollout_logger import ComplianceRolloutLogger, RolloutLoggerCfg
 
 
+def _sanitize_runner_cfg_for_installed_rsl_rl(agent_cfg: RslRlOnPolicyRunnerCfg) -> dict:
+    """Drop algorithm keys unsupported by the installed rsl-rl runtime."""
+    runner_cfg = agent_cfg.to_dict()
+    algorithm_cfg = runner_cfg.get("algorithm")
+    if not isinstance(algorithm_cfg, dict):
+        return runner_cfg
+
+    algorithm_name = str(algorithm_cfg.get("class_name", ""))
+    if algorithm_name and algorithm_name != "PPO":
+        return runner_cfg
+
+    supported_keys = set(inspect.signature(PPO.__init__).parameters.keys())
+    supported_keys.discard("self")
+    supported_keys.discard("policy")
+
+    removed_keys: list[str] = []
+    for key in list(algorithm_cfg.keys()):
+        if key == "class_name":
+            continue
+        if key not in supported_keys:
+            algorithm_cfg.pop(key)
+            removed_keys.append(key)
+
+    if removed_keys:
+        print(
+            "[WARN] Dropping unsupported PPO cfg keys for installed rsl-rl "
+            f"({INSTALLED_RSL_RL_VERSION}): {', '.join(removed_keys)}"
+        )
+
+    return runner_cfg
+
+
+def _should_use_deprecated_cfg_handler(installed_version: str) -> bool:
+    """Use IsaacLab's deprecated-config adapter only for rsl-rl >= 4.0.0."""
+    try:
+        return version.parse(installed_version) >= version.parse("4.0.0")
+    except Exception:
+        return False
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    if _should_use_deprecated_cfg_handler(INSTALLED_RSL_RL_VERSION):
+        agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, INSTALLED_RSL_RL_VERSION)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     if hasattr(env_cfg, "compliance") and args_cli.enable_compliance_plugin:
         env_cfg.compliance.enable = True
@@ -161,7 +212,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env)
 
     # load previously trained model
-    ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    ppo_runner = OnPolicyRunner(
+        env,
+        _sanitize_runner_cfg_for_installed_rsl_rl(agent_cfg),
+        log_dir=None,
+        device=agent_cfg.device,
+    )
     ppo_runner.load(resume_path)
 
     # obtain the trained policy for inference
@@ -180,7 +236,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
     attach_onnx_metadata(env.unwrapped, args_cli.wandb_path if args_cli.wandb_path else "none", export_model_dir)
     # reset environment
-    obs, _ = env.get_observations()
+    _obs_pack = env.get_observations()
+    if isinstance(_obs_pack, tuple):
+        obs = _obs_pack[0]
+    else:
+        obs = _obs_pack
     timestep = 0
 
     logger = None

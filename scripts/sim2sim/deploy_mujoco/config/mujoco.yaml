@@ -1,0 +1,2 @@
+sim2sim:
+  config_file: ../../jingchu01_deploy.yaml

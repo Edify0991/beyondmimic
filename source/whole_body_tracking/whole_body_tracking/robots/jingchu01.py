@@ -1,49 +1,402 @@
+import os
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 from whole_body_tracking.assets import ASSET_DIR
 
-# ============ 电机参数计算 ============
-# 保持与G1相同的自然频率和阻尼比
-NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 62.83 rad/s (10Hz)
-DAMPING_RATIO = 2.0
 
-# 根据目标Kp反推ARMATURE值
-# 公式: Kp = ARMATURE * NATURAL_FREQ^2
-# 公式: Kd = 2 * DAMPING_RATIO * ARMATURE * NATURAL_FREQ
+def _env_list(var_name: str, default: list[str]) -> tuple[str, ...]:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return tuple(default)
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values if values else tuple(default)
 
-# 髋关节目标: Kp≈150, Kd≈10
-ARMATURE_HIP = 150.0 / (NATURAL_FREQ**2)
-STIFFNESS_HIP = ARMATURE_HIP * NATURAL_FREQ**2  # ≈150
-DAMPING_HIP = 2.0 * DAMPING_RATIO * ARMATURE_HIP * NATURAL_FREQ  # ≈9.55
 
-# 膝关节目标: Kp≈200, Kd≈15
-ARMATURE_KNEE = 200.0 / (NATURAL_FREQ**2)
-STIFFNESS_KNEE = ARMATURE_KNEE * NATURAL_FREQ**2  # ≈200
-DAMPING_KNEE = 2.0 * DAMPING_RATIO * ARMATURE_KNEE * NATURAL_FREQ  # ≈12.73
+# -----------------------------------------------------------------------------
+# Runtime mode selection
+# -----------------------------------------------------------------------------
+# WBT_JINGCHU01_CONTROL_MODE options:
+# - lower_body: 12-DOF leg-only control/tracking (default)
+# - full_body: keep full-body interfaces for future use
+SUPPORTED_CONTROL_MODES = ("lower_body", "full_body")
+JINGCHU01_CONTROL_MODE = os.getenv("WBT_JINGCHU01_CONTROL_MODE", "lower_body").strip().lower()
+if JINGCHU01_CONTROL_MODE not in SUPPORTED_CONTROL_MODES:
+    raise ValueError(
+        f"Invalid WBT_JINGCHU01_CONTROL_MODE='{JINGCHU01_CONTROL_MODE}'. "
+        f"Expected one of: {SUPPORTED_CONTROL_MODES}."
+    )
 
-# 踝关节目标: Kp≈50, Kd≈3
-ARMATURE_ANKLE = 50.0 / (NATURAL_FREQ**2)
-STIFFNESS_ANKLE = ARMATURE_ANKLE * NATURAL_FREQ**2  # ≈50
-DAMPING_ANKLE = 2.0 * DAMPING_RATIO * ARMATURE_ANKLE * NATURAL_FREQ  # ≈3.18
 
-# 手臂关节（假设使用较小的电机，类似G1的5020电机）
-ARMATURE_ARM = 0.003609725  # 与G1的5020电机相同
-STIFFNESS_ARM = ARMATURE_ARM * NATURAL_FREQ**2
-DAMPING_ARM = 2.0 * DAMPING_RATIO * ARMATURE_ARM * NATURAL_FREQ
+# Set this in your shell when URDF is outside this repository.
+JINGCHU01_URDF_PATH = os.path.abspath(
+    os.path.expanduser(
+        os.getenv(
+            "WBT_JINGCHU01_URDF",
+            f"/home/user/wmd/jingchu01/JC01-7DOF-URDF/JC01-URDF-18所/JC01-URDF_legs.urdf",
+        )
+    )
+)
 
-# 腰部关节（假设使用中等电机）
-ARMATURE_WAIST = 0.003609725  # 与G1的5020电机相同
-STIFFNESS_WAIST = ARMATURE_WAIST * NATURAL_FREQ**2
-DAMPING_WAIST = 2.0 * DAMPING_RATIO * ARMATURE_WAIST * NATURAL_FREQ
+
+# -----------------------------------------------------------------------------
+# Motion/body metadata defaults
+# -----------------------------------------------------------------------------
+JINGCHU01_MOTION_JOINT_NAMES_LOWER_BODY = (
+    "right_hip_roll",
+    "right_hip_yaw",
+    "right_hip_pitch",
+    "right_knee_pitch",
+    "right_ankle_pitch",
+    "right_ankle_roll",
+    "left_hip_roll",
+    "left_hip_yaw",
+    "left_hip_pitch",
+    "left_knee_pitch",
+    "left_ankle_pitch",
+    "left_ankle_roll",
+)
+
+JINGCHU01_MOTION_JOINT_NAMES_FULL_BODY = (
+    "right_hip_roll",
+    "right_hip_yaw",
+    "right_hip_pitch",
+    "right_knee_pitch",
+    "right_ankle_pitch",
+    "right_ankle_roll",
+    "left_hip_roll",
+    "left_hip_yaw",
+    "left_hip_pitch",
+    "left_knee_pitch",
+    "left_ankle_pitch",
+    "left_ankle_roll",
+    "waist_roll",
+    "waist_yaw",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_shoulder_yaw",
+    "right_elbow_pitch",
+    "right_elbow_yaw",
+    "right_wrist_pitch",
+    "right_wrist_roll",
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_shoulder_yaw",
+    "left_elbow_pitch",
+    "left_elbow_yaw",
+    "left_wrist_pitch",
+    "left_wrist_roll",
+)
+
+JINGCHU01_MOTION_BODY_NAMES_LOWER_BODY = (
+    "Robotbase",
+    "right_hip_roll",
+    "right_hip_yaw",
+    "right_hip_pitch",
+    "right_knee_pitch",
+    "right_ankle_pitch",
+    "right_ankle_roll",
+    "left_hip_roll",
+    "left_hip_yaw",
+    "left_hip_pitch",
+    "left_knee_pitch",
+    "left_ankle_pitch",
+    "left_ankle_roll",
+)
+
+JINGCHU01_MOTION_BODY_NAMES_FULL_BODY = (
+    "Robotbase",
+    "right_hip_roll",
+    "right_hip_yaw",
+    "right_hip_pitch",
+    "right_knee_pitch",
+    "right_ankle_pitch",
+    "right_ankle_roll",
+    "left_hip_roll",
+    "left_hip_yaw",
+    "left_hip_pitch",
+    "left_knee_pitch",
+    "left_ankle_pitch",
+    "left_ankle_roll",
+    "waist_roll",
+    "waist_yaw",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_shoulder_yaw",
+    "right_elbow_pitch",
+    "right_elbow_yaw",
+    "right_wrist_pitch",
+    "right_wrist_roll",
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_shoulder_yaw",
+    "left_elbow_pitch",
+    "left_elbow_yaw",
+    "left_wrist_pitch",
+    "left_wrist_roll",
+)
+
+JINGCHU01_CONTACT_EXEMPT_BODY_NAMES_LOWER_BODY = (
+    "right_ankle_roll",
+    "left_ankle_roll",
+)
+
+JINGCHU01_CONTACT_EXEMPT_BODY_NAMES_FULL_BODY = (
+    "right_ankle_roll",
+    "left_ankle_roll",
+    "right_wrist_roll",
+    "left_wrist_roll",
+)
+
+
+def _default_for_mode(lower_body_values: tuple[str, ...], full_body_values: tuple[str, ...]) -> list[str]:
+    if JINGCHU01_CONTROL_MODE == "full_body":
+        return list(full_body_values)
+    return list(lower_body_values)
+
+
+# Override via env vars when your naming differs:
+# - WBT_JINGCHU01_JOINT_NAMES
+# - WBT_JINGCHU01_ANCHOR_BODY
+# - WBT_JINGCHU01_BODY_NAMES
+# - WBT_JINGCHU01_CONTACT_EXEMPT_BODIES
+# - WBT_JINGCHU01_TERMINATION_BODIES
+JINGCHU01_MOTION_JOINT_NAMES = _env_list(
+    "WBT_JINGCHU01_JOINT_NAMES",
+    _default_for_mode(JINGCHU01_MOTION_JOINT_NAMES_LOWER_BODY, JINGCHU01_MOTION_JOINT_NAMES_FULL_BODY),
+)
+
+JINGCHU01_ANCHOR_BODY_NAME = os.getenv("WBT_JINGCHU01_ANCHOR_BODY", "Robotbase")
+
+JINGCHU01_MOTION_BODY_NAMES = _env_list(
+    "WBT_JINGCHU01_BODY_NAMES",
+    _default_for_mode(JINGCHU01_MOTION_BODY_NAMES_LOWER_BODY, JINGCHU01_MOTION_BODY_NAMES_FULL_BODY),
+)
+
+JINGCHU01_CONTACT_EXEMPT_BODY_NAMES = _env_list(
+    "WBT_JINGCHU01_CONTACT_EXEMPT_BODIES",
+    _default_for_mode(
+        JINGCHU01_CONTACT_EXEMPT_BODY_NAMES_LOWER_BODY,
+        JINGCHU01_CONTACT_EXEMPT_BODY_NAMES_FULL_BODY,
+    ),
+)
+
+JINGCHU01_TERMINATION_BODY_NAMES = _env_list(
+    "WBT_JINGCHU01_TERMINATION_BODIES",
+    list(JINGCHU01_CONTACT_EXEMPT_BODY_NAMES),
+)
+
+
+# -----------------------------------------------------------------------------
+# Motor parameters
+# -----------------------------------------------------------------------------
+# Kp = armature * natural_freq^2
+# Kd = 2 * damping_ratio * armature * natural_freq
+NATURAL_FREQ = 6.0 * 2.0 * 3.1415926535
+DAMPING_RATIO = 1.1
+
+ARMATURE_A10020_P224 = 0.2773762228
+ARMATURE_A10020_P112 = 0.07001770124
+ARMATURE_A8112_P118 = 0.0485578476
+ARMATURE_A6408_P225 = 0.03960461065
+ARMATURE_A4310_P236 = 0.02422284137
+
+STIFFNESS_A10020_P224 = ARMATURE_A10020_P224 * NATURAL_FREQ**2
+STIFFNESS_A10020_P112 = ARMATURE_A10020_P112 * NATURAL_FREQ**2
+STIFFNESS_A8112_P118 = ARMATURE_A8112_P118 * NATURAL_FREQ**2
+STIFFNESS_A6408_P225 = ARMATURE_A6408_P225 * NATURAL_FREQ**2
+STIFFNESS_A4310_P236 = ARMATURE_A4310_P236 * NATURAL_FREQ**2
+
+DAMPING_A10020_P224 = 2.0 * DAMPING_RATIO * ARMATURE_A10020_P224 * NATURAL_FREQ
+DAMPING_A10020_P112 = 2.0 * DAMPING_RATIO * ARMATURE_A10020_P112 * NATURAL_FREQ
+DAMPING_A8112_P118 = 2.0 * DAMPING_RATIO * ARMATURE_A8112_P118 * NATURAL_FREQ
+DAMPING_A6408_P225 = 2.0 * DAMPING_RATIO * ARMATURE_A6408_P225 * NATURAL_FREQ
+DAMPING_A4310_P236 = 2.0 * DAMPING_RATIO * ARMATURE_A4310_P236 * NATURAL_FREQ
+
+ARMATURE_KNEE = 300.0 / (NATURAL_FREQ**2)
+STIFFNESS_KNEE = ARMATURE_KNEE * NATURAL_FREQ**2
+DAMPING_KNEE = 2.0 * DAMPING_RATIO * ARMATURE_KNEE * NATURAL_FREQ
+
+# Joint matching patterns
+HIP_ROLL = r".*_hip_roll(?:_joint)?$"
+HIP_YAW = r".*_hip_yaw(?:_joint)?$"
+HIP_PITCH = r".*_hip_pitch(?:_joint)?$"
+KNEE_PITCH = r".*_knee_pitch(?:_joint)?$"
+ANKLE_PITCH = r".*_ankle_pitch(?:_joint)?$"
+ANKLE_ROLL = r".*_ankle_roll(?:_joint)?$"
+WAIST_ROLL = r"waist_roll(?:_joint)?$"
+WAIST_YAW = r"waist_yaw(?:_joint)?$"
+SHOULDER_PITCH = r".*_shoulder_pitch(?:_joint)?$"
+SHOULDER_ROLL = r".*_shoulder_roll(?:_joint)?$"
+SHOULDER_YAW = r".*_shoulder_yaw(?:_joint)?$"
+ELBOW_PITCH = r".*_elbow_pitch(?:_joint)?$"
+ELBOW_YAW = r".*_elbow_yaw(?:_joint)?$"
+WRIST_PITCH = r".*_wrist_pitch(?:_joint)?$"
+WRIST_ROLL = r".*_wrist_roll(?:_joint)?$"
+
+
+FULL_BODY_INIT_JOINT_POS = {
+    HIP_PITCH: -0.24,
+    KNEE_PITCH: 0.48,
+    ANKLE_PITCH: -0.24,
+    SHOULDER_PITCH: 0.2,
+    SHOULDER_ROLL: 0.0,
+    ELBOW_PITCH: 0.5,
+}
+
+LOWER_BODY_INIT_JOINT_POS = {
+    HIP_PITCH: -0.24,
+    KNEE_PITCH: 0.48,
+    ANKLE_PITCH: -0.24,
+}
+
+
+def _build_full_body_actuators() -> dict[str, ImplicitActuatorCfg]:
+    return {
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[HIP_ROLL, HIP_YAW, HIP_PITCH, KNEE_PITCH],
+            effort_limit_sim={
+                HIP_ROLL: 130.0,
+                HIP_YAW: 130.0,
+                HIP_PITCH: 130.0,
+                KNEE_PITCH: 130.0,
+            },
+            velocity_limit_sim={
+                HIP_ROLL: 2.094,
+                HIP_YAW: 2.618,
+                HIP_PITCH: 3.926,
+                KNEE_PITCH: 2.770,
+            },
+            stiffness={
+                HIP_ROLL: STIFFNESS_A10020_P224,
+                HIP_YAW: STIFFNESS_A10020_P112,
+                HIP_PITCH: STIFFNESS_A10020_P224,
+                KNEE_PITCH: STIFFNESS_KNEE,
+            },
+            damping={
+                HIP_ROLL: DAMPING_A10020_P224,
+                HIP_YAW: DAMPING_A10020_P112,
+                HIP_PITCH: DAMPING_A10020_P224,
+                KNEE_PITCH: DAMPING_KNEE,
+            },
+            armature={
+                HIP_ROLL: ARMATURE_A10020_P224,
+                HIP_YAW: ARMATURE_A10020_P112,
+                HIP_PITCH: ARMATURE_A10020_P224,
+                KNEE_PITCH: ARMATURE_KNEE,
+            },
+        ),
+        "feet": ImplicitActuatorCfg(
+            joint_names_expr=[ANKLE_PITCH, ANKLE_ROLL],
+            effort_limit_sim={
+                ANKLE_PITCH: 130.0,
+                ANKLE_ROLL: 130.0,
+            },
+            velocity_limit_sim={
+                ANKLE_PITCH: 3.124,
+                ANKLE_ROLL: 4.160,
+            },
+            stiffness=2.0*STIFFNESS_A8112_P118,
+            damping=2.0*DAMPING_A8112_P118,
+            armature=2.0*ARMATURE_A8112_P118,
+        ),
+        "waist_joints": ImplicitActuatorCfg(
+            joint_names_expr=[WAIST_ROLL, WAIST_YAW],
+            effort_limit_sim={
+                WAIST_ROLL: 50.0,
+                WAIST_YAW: 50.0,
+            },
+            velocity_limit_sim={
+                WAIST_ROLL: 2.0,
+                WAIST_YAW: 2.0,
+            },
+            stiffness={
+                WAIST_ROLL: STIFFNESS_A10020_P224,
+                WAIST_YAW: STIFFNESS_A10020_P112,
+            },
+            damping={
+                WAIST_ROLL: DAMPING_A10020_P224,
+                WAIST_YAW: DAMPING_A10020_P112,
+            },
+            armature={
+                WAIST_ROLL: ARMATURE_A10020_P224,
+                WAIST_YAW: ARMATURE_A10020_P112,
+            },
+        ),
+        "arms": ImplicitActuatorCfg(
+            joint_names_expr=[SHOULDER_PITCH, SHOULDER_ROLL, SHOULDER_YAW, ELBOW_PITCH, ELBOW_YAW, WRIST_PITCH, WRIST_ROLL],
+            effort_limit_sim={
+                SHOULDER_PITCH: 25.0,
+                SHOULDER_ROLL: 25.0,
+                SHOULDER_YAW: 25.0,
+                ELBOW_PITCH: 25.0,
+                ELBOW_YAW: 25.0,
+                WRIST_PITCH: 10.0,
+                WRIST_ROLL: 10.0,
+            },
+            velocity_limit_sim={
+                SHOULDER_PITCH: 2.0,
+                SHOULDER_ROLL: 2.0,
+                SHOULDER_YAW: 2.0,
+                ELBOW_PITCH: 2.0,
+                ELBOW_YAW: 2.0,
+                WRIST_PITCH: 2.0,
+                WRIST_ROLL: 2.0,
+            },
+            stiffness={
+                SHOULDER_PITCH: STIFFNESS_A8112_P118,
+                SHOULDER_ROLL: STIFFNESS_A8112_P118,
+                SHOULDER_YAW: STIFFNESS_A6408_P225,
+                ELBOW_PITCH: STIFFNESS_A6408_P225,
+                ELBOW_YAW: STIFFNESS_A4310_P236,
+                WRIST_PITCH: STIFFNESS_A4310_P236,
+                WRIST_ROLL: STIFFNESS_A4310_P236,
+            },
+            damping={
+                SHOULDER_PITCH: DAMPING_A8112_P118,
+                SHOULDER_ROLL: DAMPING_A8112_P118,
+                SHOULDER_YAW: DAMPING_A6408_P225,
+                ELBOW_PITCH: DAMPING_A6408_P225,
+                ELBOW_YAW: DAMPING_A4310_P236,
+                WRIST_PITCH: DAMPING_A4310_P236,
+                WRIST_ROLL: DAMPING_A4310_P236,
+            },
+            armature={
+                SHOULDER_PITCH: ARMATURE_A8112_P118,
+                SHOULDER_ROLL: ARMATURE_A8112_P118,
+                SHOULDER_YAW: ARMATURE_A6408_P225,
+                ELBOW_PITCH: ARMATURE_A6408_P225,
+                ELBOW_YAW: ARMATURE_A4310_P236,
+                WRIST_PITCH: ARMATURE_A4310_P236,
+                WRIST_ROLL: ARMATURE_A4310_P236,
+            },
+        ),
+    }
+
+
+def _select_actuators_for_mode() -> dict[str, ImplicitActuatorCfg]:
+    full_body = _build_full_body_actuators()
+    if JINGCHU01_CONTROL_MODE == "full_body":
+        return full_body
+    return {
+        "legs": full_body["legs"],
+        "feet": full_body["feet"],
+    }
+
+
+def _select_init_joint_pos_for_mode() -> dict[str, float]:
+    if JINGCHU01_CONTROL_MODE == "full_body":
+        return FULL_BODY_INIT_JOINT_POS
+    return LOWER_BODY_INIT_JOINT_POS
 
 
 JINGCHU01_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
         replace_cylinders_with_capsules=True,
-        asset_path=f"{ASSET_DIR}/../../../jingchu01/jingchu01_legs.urdf",  # 请根据实际路径修改
+        asset_path=JINGCHU01_URDF_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -57,150 +410,31 @@ JINGCHU01_CFG = ArticulationCfg(
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=True,
             solver_position_iteration_count=8,
-            solver_velocity_iteration_count=4
+            solver_velocity_iteration_count=4,
         ),
         joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.98),  # 初始高度，根据机器人调整
-        joint_pos={
-            # 腿部初始姿态（站立姿态）
-            ".*_hip_pitch": -0.24,
-            ".*_knee_pitch": 0.48,
-            ".*_ankle_pitch": -0.24,
-            # 手臂初始姿态
-            ".*_shoulder_pitch": 0.2,
-            ".*_shoulder_roll": 0.0,
-            ".*_elbow_pitch": 0.5,
-        },
+        pos=(0.0, 0.0, 0.98),
+        joint_pos=_select_init_joint_pos_for_mode(),
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.9,
-    actuators={
-        # ============ 髋关节 (Kp≈150, Kd≈9.55) ============
-        "hip_joints": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_hip_roll",
-                ".*_hip_yaw",
-                ".*_hip_pitch",
-            ],
-            # 从URDF读取的effort和velocity限制
-            effort_limit_sim={
-                ".*_hip_roll": 163.0,
-                ".*_hip_yaw": 130.0,
-                ".*_hip_pitch": 484.23,
-            },
-            velocity_limit_sim={
-                ".*_hip_roll": 2.094,
-                ".*_hip_yaw": 2.618,
-                ".*_hip_pitch": 3.926,
-            },
-            stiffness=STIFFNESS_HIP,
-            damping=DAMPING_HIP,
-            armature=ARMATURE_HIP,
-        ),
-        
-        # ============ 膝关节 (Kp≈200, Kd≈12.73) ============
-        "knee_joints": ImplicitActuatorCfg(
-            joint_names_expr=[".*_knee_pitch"],
-            effort_limit_sim=306.0,
-            velocity_limit_sim=2.770,
-            stiffness=STIFFNESS_KNEE,
-            damping=DAMPING_KNEE,
-            armature=ARMATURE_KNEE,
-        ),
-        
-        # ============ 踝关节 (Kp≈50, Kd≈3.18) ============
-        "ankle_joints": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_ankle_pitch",
-                ".*_ankle_roll",
-            ],
-            effort_limit_sim={
-                ".*_ankle_pitch": 509.163,
-                ".*_ankle_roll": 314.930,
-            },
-            velocity_limit_sim={
-                ".*_ankle_pitch": 3.124,
-                ".*_ankle_roll": 4.160,
-            },
-            stiffness=STIFFNESS_ANKLE,
-            damping=DAMPING_ANKLE,
-            armature=ARMATURE_ANKLE,
-        ),
-        
-        # ============ 腰部关节 ============
-        "waist_joints": ImplicitActuatorCfg(
-            joint_names_expr=[
-                "waist_roll",
-                "waist_yaw",
-            ],
-            effort_limit_sim=50.0,  # 需要根据实际电机调整
-            velocity_limit_sim=2.0,
-            stiffness=STIFFNESS_WAIST,
-            damping=DAMPING_WAIST,
-            armature=ARMATURE_WAIST,
-        ),
-        
-        # ============ 手臂关节 ============
-        "shoulder_joints": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_shoulder_pitch",
-                ".*_shoulder_roll",
-                ".*_shoulder_yaw",
-            ],
-            effort_limit_sim=25.0,  # 需要根据实际电机调整
-            velocity_limit_sim=2.0,
-            stiffness=STIFFNESS_ARM,
-            damping=DAMPING_ARM,
-            armature=ARMATURE_ARM,
-        ),
-        
-        "elbow_joints": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_elbow_pitch",
-                ".*_elbow_yaw",
-            ],
-            effort_limit_sim=25.0,
-            velocity_limit_sim=2.0,
-            stiffness=STIFFNESS_ARM,
-            damping=DAMPING_ARM,
-            armature=ARMATURE_ARM,
-        ),
-        
-        "wrist_joints": ImplicitActuatorCfg(
-            joint_names_expr=[".*_wrist_pitch"],
-            effort_limit_sim=10.0,
-            velocity_limit_sim=2.0,
-            stiffness=STIFFNESS_ARM,
-            damping=DAMPING_ARM,
-            armature=ARMATURE_ARM,
-        ),
-    },
+    actuators=_select_actuators_for_mode(),
 )
 
-# ============ 动作缩放因子计算 ============
+
 JINGCHU01_ACTION_SCALE = {}
-for a in JINGCHU01_CFG.actuators.values():
-    e = a.effort_limit_sim
-    s = a.stiffness
-    names = a.joint_names_expr
-    if not isinstance(e, dict):
-        e = {n: e for n in names}
-    if not isinstance(s, dict):
-        s = {n: s for n in names}
-    for n in names:
-        if n in e and n in s and s[n]:
-            JINGCHU01_ACTION_SCALE[n] = 0.25 * e[n] / s[n]
-
-
-# ============ 参数验证打印 ============
-print("=" * 60)
-print("电机参数验证 (自然频率 = {:.2f} rad/s)".format(NATURAL_FREQ))
-print("=" * 60)
-print(f"髋关节: Kp={STIFFNESS_HIP:.2f}, Kd={DAMPING_HIP:.2f}, Armature={ARMATURE_HIP:.6f}")
-print(f"膝关节: Kp={STIFFNESS_KNEE:.2f}, Kd={DAMPING_KNEE:.2f}, Armature={ARMATURE_KNEE:.6f}")
-print(f"踝关节: Kp={STIFFNESS_ANKLE:.2f}, Kd={DAMPING_ANKLE:.2f}, Armature={ARMATURE_ANKLE:.6f}")
-print("=" * 60)
+for actuator_cfg in JINGCHU01_CFG.actuators.values():
+    effort_limit = actuator_cfg.effort_limit_sim
+    stiffness = actuator_cfg.stiffness
+    names = actuator_cfg.joint_names_expr
+    if not isinstance(effort_limit, dict):
+        effort_limit = {name: effort_limit for name in names}
+    if not isinstance(stiffness, dict):
+        stiffness = {name: stiffness for name in names}
+    for name in names:
+        if name in effort_limit and name in stiffness and stiffness[name]:
+            JINGCHU01_ACTION_SCALE[name] = 0.25 * effort_limit[name] / stiffness[name]

@@ -65,13 +65,65 @@ class MotionCommand(CommandTerm):
         super().__init__(cfg, env)
         self._env = env
         self.robot: Articulation = env.scene[cfg.asset_name]
-        self.robot_anchor_body_index = self.robot.body_names.index(self.cfg.anchor_body_name)
-        self.motion_anchor_body_index = self.cfg.body_names.index(self.cfg.anchor_body_name)
-        self.body_indexes = torch.tensor(
-            self.robot.find_bodies(self.cfg.body_names, preserve_order=True)[0], dtype=torch.long, device=self.device
-        )
+        body_indexes, _ = self.robot.find_bodies(self.cfg.body_names, preserve_order=True)
+        self.body_indexes = torch.tensor(body_indexes, dtype=torch.long, device=self.device)
+
+        anchor_body_indexes, _ = self.robot.find_bodies([self.cfg.anchor_body_name], preserve_order=True)
+        if len(anchor_body_indexes) != 1:
+            raise ValueError(
+                f"anchor_body_name '{self.cfg.anchor_body_name}' must match exactly one body, "
+                f"but found {len(anchor_body_indexes)}."
+            )
+        self.robot_anchor_body_index = int(anchor_body_indexes[0])
+
+        body_indexes_list = self.body_indexes.tolist()
+        if self.robot_anchor_body_index not in body_indexes_list:
+            raise ValueError(
+                f"anchor_body_name '{self.cfg.anchor_body_name}' resolved to body index "
+                f"{self.robot_anchor_body_index}, but this body is not included in body_names."
+            )
+        self.motion_anchor_body_index = body_indexes_list.index(self.robot_anchor_body_index)
 
         self.motion = MotionLoader(self.cfg.motion_file, self.body_indexes, device=self.device)
+
+        self.robot_joint_count = int(self.robot.data.joint_pos.shape[1])
+        cfg_joint_names = getattr(self.cfg, "joint_names", None)
+        if cfg_joint_names is None:
+            self.joint_indexes = torch.arange(self.robot_joint_count, dtype=torch.long, device=self.device)
+            default_joint_names = getattr(self.robot.data, "joint_names", None)
+            if default_joint_names is None:
+                self.joint_names = [str(i) for i in range(self.robot_joint_count)]
+            else:
+                self.joint_names = list(default_joint_names)
+        else:
+            resolved_joint_indexes, resolved_joint_names = self.robot.find_joints(cfg_joint_names, preserve_order=True)
+            if len(resolved_joint_indexes) != len(cfg_joint_names):
+                raise ValueError(
+                    f"commands.motion.joint_names contains unresolved names. "
+                    f"resolved {len(resolved_joint_indexes)} / {len(cfg_joint_names)}: {cfg_joint_names}"
+                )
+            self.joint_indexes = torch.tensor(resolved_joint_indexes, dtype=torch.long, device=self.device)
+            self.joint_names = list(resolved_joint_names)
+
+        motion_joint_count = int(self.motion.joint_pos.shape[1])
+        selected_joint_count = int(self.joint_indexes.numel())
+        if motion_joint_count == self.robot_joint_count:
+            self.motion_joint_layout = "full_articulation"
+        elif motion_joint_count == selected_joint_count:
+            self.motion_joint_layout = "selected_joints"
+        else:
+            raise ValueError(
+                "Motion joint dimension mismatch. "
+                f"motion_joint_count={motion_joint_count}, robot_joint_count={self.robot_joint_count}, "
+                f"selected_joint_count={selected_joint_count}."
+            )
+
+        print(
+            "[INFO] MotionCommand joint mapping: "
+            f"layout={self.motion_joint_layout}, selected_joint_count={selected_joint_count}, "
+            f"joint_names={self.joint_names}"
+        )
+
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 4, device=self.device)
@@ -103,11 +155,17 @@ class MotionCommand(CommandTerm):
 
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self.motion.joint_pos[self.time_steps]
+        joint_pos = self.motion.joint_pos[self.time_steps]
+        if self.motion_joint_layout == "full_articulation":
+            return joint_pos[:, self.joint_indexes]
+        return joint_pos
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self.motion.joint_vel[self.time_steps]
+        joint_vel = self.motion.joint_vel[self.time_steps]
+        if self.motion_joint_layout == "full_articulation":
+            return joint_vel[:, self.joint_indexes]
+        return joint_vel
 
     @property
     def body_pos_w(self) -> torch.Tensor:
@@ -143,11 +201,11 @@ class MotionCommand(CommandTerm):
 
     @property
     def robot_joint_pos(self) -> torch.Tensor:
-        return self.robot.data.joint_pos
+        return self.robot.data.joint_pos[:, self.joint_indexes]
 
     @property
     def robot_joint_vel(self) -> torch.Tensor:
-        return self.robot.data.joint_vel
+        return self.robot.data.joint_vel[:, self.joint_indexes]
 
     @property
     def robot_body_pos_w(self) -> torch.Tensor:
@@ -262,15 +320,20 @@ class MotionCommand(CommandTerm):
         root_lin_vel[env_ids] += rand_samples[:, :3]
         root_ang_vel[env_ids] += rand_samples[:, 3:]
 
-        joint_pos = self.joint_pos.clone()
-        joint_vel = self.joint_vel.clone()
+        joint_pos_cmd = self.joint_pos.clone()
+        joint_vel_cmd = self.joint_vel.clone()
 
-        joint_pos += sample_uniform(*self.cfg.joint_position_range, joint_pos.shape, joint_pos.device)
-        soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids]
-        joint_pos[env_ids] = torch.clip(
-            joint_pos[env_ids], soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1]
+        joint_pos_cmd += sample_uniform(*self.cfg.joint_position_range, joint_pos_cmd.shape, joint_pos_cmd.device)
+        soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids][:, self.joint_indexes, :]
+        joint_pos_cmd[env_ids] = torch.clip(
+            joint_pos_cmd[env_ids], soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1]
         )
-        self.robot.write_joint_state_to_sim(joint_pos[env_ids], joint_vel[env_ids], env_ids=env_ids)
+
+        joint_pos_full = self.robot.data.default_joint_pos.clone()
+        joint_vel_full = self.robot.data.default_joint_vel.clone()
+        joint_pos_full[:, self.joint_indexes] = joint_pos_cmd
+        joint_vel_full[:, self.joint_indexes] = joint_vel_cmd
+        self.robot.write_joint_state_to_sim(joint_pos_full[env_ids], joint_vel_full[env_ids], env_ids=env_ids)
         self.robot.write_root_state_to_sim(
             torch.cat([root_pos[env_ids], root_ori[env_ids], root_lin_vel[env_ids], root_ang_vel[env_ids]], dim=-1),
             env_ids=env_ids,
@@ -359,6 +422,7 @@ class MotionCommandCfg(CommandTermCfg):
     motion_file: str = MISSING
     anchor_body_name: str = MISSING
     body_names: list[str] = MISSING
+    joint_names: list[str] | None = None
 
     pose_range: dict[str, tuple[float, float]] = {}
     velocity_range: dict[str, tuple[float, float]] = {}

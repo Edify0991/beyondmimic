@@ -41,7 +41,14 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             attach_onnx_metadata(self.env.unwrapped, wandb.run.name, path=policy_path, filename=filename)
             wandb.save(policy_path + filename, base_path=os.path.dirname(policy_path))
 
-            # link the artifact registry to this run
+            # link the artifact registry to this run (best-effort, never crash training)
             if self.registry_name is not None:
-                wandb.run.use_artifact(self.registry_name)
+                artifact_ref = str(self.registry_name).strip()
+                if artifact_ref:
+                    if ":" not in artifact_ref:
+                        artifact_ref += ":latest"
+                    try:
+                        wandb.run.use_artifact(artifact_ref)
+                    except Exception as err:
+                        print(f"[WARN] Failed to link wandb artifact '{artifact_ref}': {err}")
                 self.registry_name = None

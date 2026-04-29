@@ -1,0 +1,86 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python mujoco sim2sim",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "scripts/sim2sim/validate_policy_mujoco.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CONDA_PREFIX": "/home/user/anaconda/envs/lyc-sim2sim",
+                "PATH": "/home/user/anaconda/envs/lyc-sim2sim/bin:${env:PATH}"
+            }
+        },
+        {
+            "name": "Train G1 Motion Tracking",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/user/anaconda3/envs/wmd_isaaclab/bin/python",
+            "program": "scripts/rsl_rl/train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--task",
+                "Tracking-Flat-G1-v0",
+                "--num_envs",
+                "2",
+                "--max_iterations",
+                "1000",
+                "--motion_file",
+                "data/motions/jumps1_subject1_seg1-267.npz"
+            ],
+            "env": {
+                "CONDA_PREFIX": "/home/user/anaconda3/envs/wmd_isaaclab",
+                "PATH": "/home/user/anaconda3/envs/wmd_isaaclab/bin:${env:PATH}"
+            }
+        },
+        {
+            "name": "Train Jingchu01 Motion Tracking",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/user/anaconda/envs/wmd_isaaclab/bin/python",
+            "program": "scripts/rsl_rl/train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--task",
+                "Tracking-Flat-Jingchu01-v0",
+                "--num_envs",
+                "2",
+                "--max_iterations",
+                "1000",
+                "--motion_file",
+                "data/motions/jingchu01_walk1_subject1_leg4.npz"
+            ],
+            "env": {
+                "CONDA_PREFIX": "/home/user/anaconda/envs/wmd_isaaclab",
+                "PATH": "/home/user/anaconda/envs/wmd_isaaclab/bin:${env:PATH}"
+            }
+        },
+        {
+            "name": "Train Jingchu01 Leg12 Motion Tracking",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/user/anaconda/envs/wmd_isaaclab/bin/python",
+            "program": "scripts/rsl_rl/train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--task",
+                "Tracking-Flat-Jingchu01-Leg12-Strict-v0",
+                "--num_envs",
+                "2",
+                "--max_iterations",
+                "1000",
+                "--motion_file",
+                "data/motions/jingchu01_walk1_subject1_leg4.npz"
+            ],
+            "env": {
+                "WBT_JINGCHU01_CONTROL_MODE": "lower_body",
+                "CONDA_PREFIX": "/home/user/anaconda/envs/wmd_isaaclab",
+                "PATH": "/home/user/anaconda/envs/wmd_isaaclab/bin:${env:PATH}"
+            }
+        }
+    ]
+}

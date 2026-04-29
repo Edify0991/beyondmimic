@@ -1,0 +1,194 @@
+resources:
+  onnx_path: ../../logs/rsl_rl/jingchu01_flat/2026-03-29_00-23-35_jc01_leg12_strict_walk1/exported/policy.onnx
+  mjcf_path: thirdparty/hust_sim2sim-v0/resource/jingchu01-18s-20260130/jingchu01_new_0304.xml
+  motion_file: ../../data/motions/jingchu01_walk1_subject1_leg4.npz
+
+training_alignment:
+  enabled: true
+  env_snapshot_path: ../../logs/rsl_rl/jingchu01_flat/2026-03-29_00-23-35_jc01_leg12_strict_walk1/params/env.yaml
+  strict: true
+  force_override: true
+  align_sim_dt: false
+  align_control_mode: true
+  # Keep action_scale from ONNX metadata (more stable in current MuJoCo deployment).
+  align_action_scale: false
+
+robot:
+  # actor
+  action_joint_names:
+    - right_hip_roll
+    - right_hip_yaw
+    - right_hip_pitch
+    - right_knee_pitch
+    - right_ankle_pitch
+    - right_ankle_roll
+    - left_hip_roll
+    - left_hip_yaw
+    - left_hip_pitch
+    - left_knee_pitch
+    - left_ankle_pitch
+    - left_ankle_roll
+  # reference
+  command_joint_names:
+    - right_hip_roll
+    - right_hip_yaw
+    - right_hip_pitch
+    - right_knee_pitch
+    - right_ankle_pitch
+    - right_ankle_roll
+    - left_hip_roll
+    - left_hip_yaw
+    - left_hip_pitch
+    - left_knee_pitch
+    - left_ankle_pitch
+    - left_ankle_roll
+  # observation
+  policy_joint_names:
+    - right_hip_roll
+    - right_hip_yaw
+    - right_hip_pitch
+    - right_knee_pitch
+    - right_ankle_pitch
+    - right_ankle_roll
+    - left_hip_roll
+    - left_hip_yaw
+    - left_hip_pitch
+    - left_knee_pitch
+    - left_ankle_pitch
+    - left_ankle_roll
+  body_names:
+    - Robotbase
+    - right_hip_roll
+    - right_hip_yaw
+    - right_hip_pitch
+    - right_knee_pitch
+    - right_ankle_pitch
+    - right_ankle_roll
+    - left_hip_roll
+    - left_hip_yaw
+    - left_hip_pitch
+    - left_knee_pitch
+    - left_ankle_pitch
+    - left_ankle_roll
+  anchor_body_name: Robotbase
+  root_body_name: Robotbase
+
+mapping:
+  mujoco_joint_names_in_train_order:
+    - right_hip_roll
+    - right_hip_yaw
+    - right_hip_pitch
+    - right_knee_pitch
+    - right_ankle_pitch
+    - right_ankle_roll
+    - left_hip_roll
+    - left_hip_yaw
+    - left_hip_pitch
+    - left_knee_pitch
+    - left_ankle_pitch
+    - left_ankle_roll
+  joint_name_map: {}
+  body_name_map:
+    Robotbase: Body
+  actuator_name_map: {}
+
+control:
+  actuation_mode: torque_pd
+  velocity_order: ang_lin
+  kp_scale: 1.0
+  kd_scale: 1.0
+  # MuJoCo-side damping/frictionloss scaling for controlled DoFs.
+  # Tuned from quick sweep: this pair is currently the most stable.
+  dof_damping_scale: 1.5
+  dof_frictionloss_scale: 1.0
+  # Optional manual override. Leave empty to prefer aligned training snapshot values.
+  action_scale: {}
+  joint_gains: {}
+
+reference:
+  source: motion_file
+  motion_file: ../../data/motions/jingchu01_walk1_subject1_leg4.npz
+  joint_indices: []
+  body_indices: []
+
+observation:
+  # Optional: load SONIC-style external observation config file.
+  # config_file: deploy_mujoco/config/observation_policy_main.yaml
+  token_dim: 0
+  pipeline: policy_main
+  pipelines:
+    policy_main:
+      terms:
+        - name: command
+          history: 1
+          enabled: true
+        - name: motion_anchor_pos_b
+          history: 1
+          enabled: true
+        - name: motion_anchor_ori_b
+          history: 1
+          enabled: true
+        - name: base_lin_vel
+          history: 1
+          enabled: true
+        - name: base_ang_vel
+          history: 1
+          enabled: true
+        - name: joint_pos
+          history: 1
+          enabled: true
+        - name: joint_vel
+          history: 1
+          enabled: true
+        - name: actions
+          history: 1
+          enabled: true
+
+policy_stack:
+  mode_id: null
+  mode_name: null
+  main_pipeline: policy_main
+  aux_models: []
+
+simulation:
+  # keep XML sim_dt by default (the training-aligned control_dt/policy_dt is still applied)
+  sim_dt: 0.001
+  # Optional runtime override for floor geom friction [sliding, torsional, rolling].
+  # Tuned from quick sweep.
+  floor_friction: [1.2, 1.2, 1.2]
+  render: true
+  realtime: true
+  realtime_factor: 1.0
+  camera_follow_anchor: true
+  camera_lookat_height_offset: 0.4
+  # Stable follow-camera defaults.
+  camera_distance: 3.2
+  camera_azimuth: 150.0
+  camera_elevation: -20.0
+  run_forever: true
+  num_steps: 0
+  duration_s: 0.0
+  print_every: 50
+  no_motion_loop: false
+  reset_on_motion_cycle: true
+  startup_pose_mode: reference_t0
+  cycle_reset_pose_mode: reference_t0
+  align_root_to_reference: true
+
+sonic:
+  fsm:
+    init_steps: 1
+    auto_start: true
+    wait_timeout_s: 0.0
+    start_in_control: false
+  input:
+    type: static
+    auto_start: true
+    stop_after_steps: 0
+  output:
+    channels:
+      - type: console
+        print_every: 100
+
+logging:
+  save_csv: ../../outputs/sim2sim/jingchu01_metrics.csv

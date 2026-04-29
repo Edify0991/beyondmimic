@@ -30,6 +30,8 @@ parser.add_argument(
 )
 parser.add_argument("--output_name", type=str, required=True, help="The name of the motion npz file.")
 parser.add_argument("--output_fps", type=int, default=50, help="The fps of the output motion.")
+parser.add_argument("--robot", type=str, default="g1", choices=["g1", "jingchu01"], help="Robot profile for simulation and joint/body conventions.")
+parser.add_argument("--joint_names", type=str, default=None, help="Optional comma-separated joint names overriding the default order for the selected robot.")
 # parser.add_argument(
 #     "--device",
 #     type=str,
@@ -61,7 +63,9 @@ from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, 
 ##
 # Pre-defined configs
 ##
-from whole_body_tracking.robots.g1 import G1_CYLINDER_CFG
+from whole_body_tracking.robots.robot_info import get_robot_profile, parse_joint_names_arg
+
+ROBOT_PROFILE = get_robot_profile(args_cli.robot)
 
 
 @configclass
@@ -81,7 +85,7 @@ class ReplayMotionsSceneCfg(InteractiveSceneCfg):
     )
 
     # articulation
-    robot: ArticulationCfg = G1_CYLINDER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    robot: ArticulationCfg = ROBOT_PROFILE.articulation_cfg.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
 
 class MotionLoader:
@@ -235,7 +239,18 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
 
     # Extract scene entities
     robot = scene["robot"]
+    if motion.motion_dof_poss.shape[1] != len(joint_names):
+        raise ValueError(
+            f"Joint dimension mismatch: motion file has {motion.motion_dof_poss.shape[1]} DOFs, "
+            f"but {len(joint_names)} joint names were provided for robot {ROBOT_PROFILE.name}."
+        )
+
     robot_joint_indexes = robot.find_joints(joint_names, preserve_order=True)[0]
+    if len(robot_joint_indexes) != len(joint_names):
+        raise ValueError(
+            "Failed to resolve all requested joints in the robot articulation. "
+            f"Resolved {len(robot_joint_indexes)} / {len(joint_names)} names: {joint_names}"
+        )
 
     # ------- data logger -------------------------------------------------------
     log = {
@@ -350,41 +365,9 @@ def main():
     # Now we are ready!
     print("[INFO]: Setup complete...")
     # Run the simulator
-    run_simulator(
-        sim,
-        scene,
-        joint_names=[
-            "left_hip_pitch_joint",
-            "left_hip_roll_joint",
-            "left_hip_yaw_joint",
-            "left_knee_joint",
-            "left_ankle_pitch_joint",
-            "left_ankle_roll_joint",
-            "right_hip_pitch_joint",
-            "right_hip_roll_joint",
-            "right_hip_yaw_joint",
-            "right_knee_joint",
-            "right_ankle_pitch_joint",
-            "right_ankle_roll_joint",
-            "waist_yaw_joint",
-            "waist_roll_joint",
-            "waist_pitch_joint",
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint",
-            "left_shoulder_yaw_joint",
-            "left_elbow_joint",
-            "left_wrist_roll_joint",
-            "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint",
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_joint",
-            "right_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_yaw_joint",
-        ],
-    )
+    joint_names = parse_joint_names_arg(args_cli.joint_names, ROBOT_PROFILE.motion_joint_names)
+    print(f"[INFO]: Using robot profile: {ROBOT_PROFILE.name}")
+    run_simulator(sim, scene, joint_names=joint_names)
 
 
 if __name__ == "__main__":

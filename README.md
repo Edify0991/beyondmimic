@@ -126,7 +126,57 @@ python scripts/replay_npz.py --registry_name={your-organization}-org/wandb-regis
 
 - Debugging
     - Make sure to export WANDB_ENTITY to your organization name, not your personal username.
-    - If /tmp folder is not accessible, modify csv_to_npz.py L319 & L326 to a temporary folder of your choice.
+    - If /tmp folder is not accessible, modify the output path in scripts/csv_to_npz.py.
+
+### Jingchu01 Quick Start
+
+1. Set Jingchu01 assets and optional naming overrides (only needed when your URDF names differ from defaults):
+
+```bash
+export WBT_JINGCHU01_URDF=/abs/path/to/jingchu01_legs.urdf
+# optional overrides:
+# export WBT_JINGCHU01_JOINT_NAMES="name1,name2,..."
+# export WBT_JINGCHU01_ANCHOR_BODY="torso_link"
+# export WBT_JINGCHU01_BODY_NAMES="body1,body2,..."
+```
+
+2. Convert motions with the Jingchu01 profile:
+
+```bash
+python scripts/csv_to_npz.py --robot jingchu01 --input_file {motion_name}.csv --input_fps 30 --output_name {motion_name} --headless
+```
+
+For PKL motions:
+
+```bash
+python scripts/pkl_to_npz.py --robot jingchu01 --input_file {motion_name}.pkl --output_name {motion_name} --output_fps 50 --headless
+```
+
+Use `--joint_names name1,name2,...` if your motion DOF order differs from the built-in Jingchu01 default order.
+
+3. Replay converted Jingchu01 motion:
+
+```bash
+python scripts/replay_npz.py --robot jingchu01 --motion_file=data/motions/{motion_name}.npz
+```
+
+4. Train with Jingchu01 task:
+
+```bash
+python scripts/rsl_rl/train.py --task=Tracking-Flat-Jingchu01-v0 \
+  --motion_file data/motions/{motion_name}.npz \
+  --headless --logger wandb --log_project_name {project_name} --run_name {run_name}
+```
+
+5. Play/evaluate Jingchu01 policy:
+
+```bash
+python scripts/rsl_rl/play.py --task=Tracking-Flat-Jingchu01-v0 --num_envs=2 \
+  --checkpoint logs/rsl_rl/jingchu01_flat/{run_dir}/model.pt \
+  --motion_file data/motions/{motion_name}.npz
+```
+
+Also available: `Tracking-Flat-Jingchu01-Wo-State-Estimation-v0`, `Tracking-Flat-Jingchu01-Low-Freq-v0`.
 
 ### Policy Training
 

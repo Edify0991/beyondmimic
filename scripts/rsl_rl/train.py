@@ -8,6 +8,8 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import importlib.metadata as metadata
+import inspect
 import sys
 
 from isaaclab.app import AppLauncher
@@ -46,12 +48,20 @@ sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+try:
+    INSTALLED_RSL_RL_VERSION = metadata.version("rsl-rl-lib")
+except metadata.PackageNotFoundError:
+    INSTALLED_RSL_RL_VERSION = "0.0.0"
+
 """Rest everything follows."""
 
 import gymnasium as gym
 import os
 import torch
 from datetime import datetime
+from packaging import version
+
+from rsl_rl.algorithms import PPO
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -89,7 +99,7 @@ except ImportError:
         """Compatibility fallback for IsaacLab versions lacking dump_pickle."""
         with open(path, "wb") as f:
             pickle.dump(data, f)
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -103,11 +113,53 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _sanitize_runner_cfg_for_installed_rsl_rl(agent_cfg: RslRlOnPolicyRunnerCfg) -> dict:
+    """Drop algorithm keys unsupported by the installed rsl-rl runtime."""
+    runner_cfg = agent_cfg.to_dict()
+    algorithm_cfg = runner_cfg.get("algorithm")
+    if not isinstance(algorithm_cfg, dict):
+        return runner_cfg
+
+    algorithm_name = str(algorithm_cfg.get("class_name", ""))
+    if algorithm_name and algorithm_name != "PPO":
+        return runner_cfg
+
+    supported_keys = set(inspect.signature(PPO.__init__).parameters.keys())
+    supported_keys.discard("self")
+    supported_keys.discard("policy")
+
+    removed_keys: list[str] = []
+    for key in list(algorithm_cfg.keys()):
+        if key == "class_name":
+            continue
+        if key not in supported_keys:
+            algorithm_cfg.pop(key)
+            removed_keys.append(key)
+
+    if removed_keys:
+        print(
+            "[WARN] Dropping unsupported PPO cfg keys for installed rsl-rl "
+            f"({INSTALLED_RSL_RL_VERSION}): {', '.join(removed_keys)}"
+        )
+
+    return runner_cfg
+
+
+def _should_use_deprecated_cfg_handler(installed_version: str) -> bool:
+    """Use IsaacLab's deprecated-config adapter only for rsl-rl >= 4.0.0."""
+    try:
+        return version.parse(installed_version) >= version.parse("4.0.0")
+    except Exception:
+        return False
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if _should_use_deprecated_cfg_handler(INSTALLED_RSL_RL_VERSION):
+        agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, INSTALLED_RSL_RL_VERSION)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
@@ -175,7 +227,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from rsl-rl
     runner = OnPolicyRunner(
-        env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device, registry_name=registry_name
+        env,
+        _sanitize_runner_cfg_for_installed_rsl_rl(agent_cfg),
+        log_dir=log_dir,
+        device=agent_cfg.device,
+        registry_name=registry_name,
     )
     # write git state to logs
     runner.add_git_repo_to_log(__file__)

@@ -8,23 +8,23 @@ from isaaclab_rl.rsl_rl import (
 
 
 @configclass
-class HumanoidFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class Jingchu01FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 5000
-    save_interval = 50
-    experiment_name = "humanoid_flat"
-    empirical_normalization = False
+    max_iterations = 30000
+    save_interval = 500
+    experiment_name = "jingchu01_flat"
+    empirical_normalization = True
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
     actor = RslRlMLPModelCfg(
         hidden_dims=[512, 256, 128],
         activation="elu",
-        obs_normalization=False,
+        obs_normalization=True,
         distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
     )
     critic = RslRlMLPModelCfg(
         hidden_dims=[512, 256, 128],
         activation="elu",
-        obs_normalization=False,
+        obs_normalization=True,
     )
     # Transitional compatibility for older rsl-rl stacks.
     policy = RslRlPpoActorCriticCfg(
@@ -33,6 +33,12 @@ class HumanoidFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
     )
+    compliance_plugin = {
+        "enabled": False,
+        "teacher_head": False,
+        "student_head": False,
+        "log_buffers": False,
+    }
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
@@ -47,3 +53,15 @@ class HumanoidFlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+LOW_FREQ_SCALE = 0.5
+
+
+@configclass
+class Jingchu01FlatLowFreqPPORunnerCfg(Jingchu01FlatPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.num_steps_per_env = round(self.num_steps_per_env * LOW_FREQ_SCALE)
+        self.algorithm.gamma = self.algorithm.gamma ** (1 / LOW_FREQ_SCALE)
+        self.algorithm.lam = self.algorithm.lam ** (1 / LOW_FREQ_SCALE)

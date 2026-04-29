@@ -1,0 +1,22 @@
+# SONIC-style external observation config (optional)
+# To enable, set in jingchu01_deploy.yaml:
+# observation:
+#   config_file: deploy_mujoco/config/observation_policy_main.yaml
+
+observations:
+  - name: command
+    enabled: true
+  - name: motion_anchor_pos_b
+    enabled: true
+  - name: motion_anchor_ori_b
+    enabled: true
+  - name: base_lin_vel
+    enabled: true
+  - name: base_ang_vel
+    enabled: true
+  - name: joint_pos
+    enabled: true
+  - name: joint_vel
+    enabled: true
+  - name: actions
+    enabled: true

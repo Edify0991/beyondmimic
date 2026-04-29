@@ -1,5 +1,10 @@
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlMLPModelCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
@@ -9,6 +14,19 @@ class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 500
     experiment_name = "g1_flat"
     empirical_normalization = True
+    obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
+    )
+    # Transitional compatibility for older rsl-rl stacks.
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_hidden_dims=[512, 256, 128],
