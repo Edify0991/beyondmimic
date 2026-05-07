@@ -1,22 +1,33 @@
-"""This script replay a motion from a csv file and output it to a npz file
+"""This script replays a motion from a csv/pkl file and outputs it to a npz file
 
 .. code-block:: bash
 
     # Usage
     python csv_to_npz.py --input_file LAFAN/dance1_subject2.csv --input_fps 30 --frame_range 122 722 \
     --output_file ./motions/dance1_subject2.npz --output_fps 50
+
+    python csv_to_npz.py --input_file motion.pkl --input_format pkl --robot jingchu01 \
+    --output_name dance1_subject2 --output_fps 50
 """
 
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import pickle
 import numpy as np
 
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Replay motion from csv file and output to npz file.")
-parser.add_argument("--input_file", type=str, required=True, help="The path to the input motion csv file.")
+parser = argparse.ArgumentParser(description="Replay motion from csv/pkl file and output to npz file.")
+parser.add_argument("--input_file", type=str, required=True, help="The path to the input motion csv/pkl file.")
+parser.add_argument(
+    "--input_format",
+    type=str,
+    default="auto",
+    choices=["auto", "csv", "pkl"],
+    help="Input motion format. PKL supports dict keys root_pos/root_rot/dof_pos/fps.",
+)
 parser.add_argument("--input_fps", type=int, default=30, help="The fps of the input motion.")
 parser.add_argument(
     "--frame_range",
@@ -32,6 +43,13 @@ parser.add_argument("--output_name", type=str, required=True, help="The name of 
 parser.add_argument("--output_fps", type=int, default=50, help="The fps of the output motion.")
 parser.add_argument("--robot", type=str, default="g1", choices=["g1", "jingchu01"], help="Robot profile for simulation and joint/body conventions.")
 parser.add_argument("--joint_names", type=str, default=None, help="Optional comma-separated joint names overriding the default order for the selected robot.")
+parser.add_argument(
+    "--pkl_root_rot_order",
+    type=str,
+    default="auto",
+    choices=["auto", "wxyz", "xyzw"],
+    help="Quaternion order for PKL root_rot. Use auto for upright-tilt heuristic.",
+)
 # parser.add_argument(
 #     "--device",
 #     type=str,
@@ -66,6 +84,34 @@ from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, 
 from whole_body_tracking.robots.robot_info import get_robot_profile, parse_joint_names_arg
 
 ROBOT_PROFILE = get_robot_profile(args_cli.robot)
+
+
+_NUMPY_PICKLE_MODULE_REMAP = {
+    "numpy._core": "numpy.core",
+    "numpy._core.multiarray": "numpy.core.multiarray",
+    "numpy._core.numeric": "numpy.core.numeric",
+    "numpy._core.umath": "numpy.core.umath",
+    "numpy._core._multiarray_umath": "numpy.core._multiarray_umath",
+}
+
+
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        mapped_module = _NUMPY_PICKLE_MODULE_REMAP.get(module, module)
+        return super().find_class(mapped_module, name)
+
+
+def _load_pickle_compat(path: str):
+    with open(path, "rb") as f:
+        try:
+            return pickle.load(f)
+        except ModuleNotFoundError as err:
+            if "numpy._core" not in str(err):
+                raise
+
+    print("[WARN] Detected numpy pickle module mismatch (numpy._core). Retrying with compatibility remap.")
+    with open(path, "rb") as f:
+        return _NumpyCompatUnpickler(f).load()
 
 
 @configclass
@@ -110,18 +156,43 @@ class MotionLoader:
         self._compute_velocities()
 
     def _load_motion(self):
-        """Loads the motion from the csv file."""
-        if self.frame_range is None:
-            motion = torch.from_numpy(np.loadtxt(self.motion_file, delimiter=","))
+        """Loads the motion from a csv or pkl file."""
+        input_format = args_cli.input_format
+        if input_format == "auto":
+            input_format = "pkl" if self.motion_file.lower().endswith(".pkl") else "csv"
+
+        if input_format == "pkl":
+            self._load_motion_from_pkl()
+        elif input_format == "csv":
+            self._load_motion_from_csv()
         else:
-            motion = torch.from_numpy(
-                np.loadtxt(
-                    self.motion_file,
-                    delimiter=",",
-                    skiprows=self.frame_range[0] - 1,
-                    max_rows=self.frame_range[1] - self.frame_range[0] + 1,
-                )
+            raise ValueError(f"Unsupported input format: {input_format}")
+
+    def _slice_arrays(self, *arrays: np.ndarray) -> list[np.ndarray]:
+        if self.frame_range is None:
+            return list(arrays)
+        start, end = self.frame_range
+        if start < 1 or end < start:
+            raise ValueError(f"Invalid --frame_range {self.frame_range}. Expected START>=1 and END>=START.")
+        start_idx = start - 1
+        end_idx = end
+        sliced = [arr[start_idx:end_idx] for arr in arrays]
+        if sliced and sliced[0].shape[0] == 0:
+            raise ValueError(f"Frame range {self.frame_range} produced empty motion.")
+        return sliced
+
+    def _load_motion_from_csv(self):
+        if self.frame_range is None:
+            motion_np = np.loadtxt(self.motion_file, delimiter=",")
+        else:
+            # CSV frame range follows the original script convention: 1-indexed, inclusive.
+            motion_np = np.loadtxt(
+                self.motion_file,
+                delimiter=",",
+                skiprows=self.frame_range[0] - 1,
+                max_rows=self.frame_range[1] - self.frame_range[0] + 1,
             )
+        motion = torch.from_numpy(motion_np)
         motion = motion.to(torch.float32).to(self.device)
         self.motion_base_poss_input = motion[:, :3]
         self.motion_base_rots_input = motion[:, 3:7]
@@ -130,7 +201,79 @@ class MotionLoader:
 
         self.input_frames = motion.shape[0]
         self.duration = (self.input_frames - 1) * self.input_dt
-        print(f"Motion loaded ({self.motion_file}), duration: {self.duration} sec, frames: {self.input_frames}")
+        print(f"Motion loaded ({self.motion_file}), format=csv, duration: {self.duration} sec, frames: {self.input_frames}")
+
+    @staticmethod
+    def _normalize_quat_array(quat: np.ndarray) -> np.ndarray:
+        quat = np.asarray(quat, dtype=np.float32)
+        norms = np.linalg.norm(quat, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-8, 1.0, norms)
+        return quat / norms
+
+    @staticmethod
+    def _median_upright_tilt_deg_wxyz(quat_wxyz: np.ndarray) -> float:
+        x = quat_wxyz[:, 1]
+        y = quat_wxyz[:, 2]
+        r_zz = 1.0 - 2.0 * (x * x + y * y)
+        return float(np.median(np.degrees(np.arccos(np.clip(r_zz, -1.0, 1.0)))))
+
+    def _resolve_pkl_root_rot(self, root_rot_raw: np.ndarray) -> np.ndarray:
+        if root_rot_raw.ndim != 2 or root_rot_raw.shape[1] != 4:
+            raise ValueError(f"PKL root_rot must have shape (T, 4), got {root_rot_raw.shape}.")
+
+        if args_cli.pkl_root_rot_order == "wxyz":
+            self.resolved_pkl_root_rot_order = "wxyz"
+            return self._normalize_quat_array(root_rot_raw)
+        if args_cli.pkl_root_rot_order == "xyzw":
+            self.resolved_pkl_root_rot_order = "xyzw"
+            return self._normalize_quat_array(root_rot_raw[:, [3, 0, 1, 2]])
+
+        quat_as_wxyz = self._normalize_quat_array(root_rot_raw)
+        quat_as_xyzw = self._normalize_quat_array(root_rot_raw[:, [3, 0, 1, 2]])
+        tilt_wxyz = self._median_upright_tilt_deg_wxyz(quat_as_wxyz)
+        tilt_xyzw = self._median_upright_tilt_deg_wxyz(quat_as_xyzw)
+        if tilt_xyzw + 1e-3 < tilt_wxyz:
+            self.resolved_pkl_root_rot_order = "xyzw"
+            chosen = quat_as_xyzw
+        else:
+            self.resolved_pkl_root_rot_order = "wxyz"
+            chosen = quat_as_wxyz
+        print(
+            "[INFO] PKL root_rot auto-detect: "
+            f"tilt_med(wxyz)={tilt_wxyz:.2f}deg, tilt_med(xyzw)={tilt_xyzw:.2f}deg, "
+            f"chosen={self.resolved_pkl_root_rot_order}"
+        )
+        return chosen
+
+    def _load_motion_from_pkl(self):
+        payload = _load_pickle_compat(self.motion_file)
+        if not isinstance(payload, dict):
+            raise TypeError(f"PKL payload must be dict, got {type(payload)}")
+        for key in ("root_pos", "root_rot", "dof_pos"):
+            if key not in payload:
+                raise KeyError(f"Missing key '{key}' in PKL motion.")
+
+        root_pos = np.asarray(payload["root_pos"], dtype=np.float32)
+        root_rot = self._resolve_pkl_root_rot(np.asarray(payload["root_rot"], dtype=np.float32))
+        dof_pos = np.asarray(payload["dof_pos"], dtype=np.float32)
+        root_pos, root_rot, dof_pos = self._slice_arrays(root_pos, root_rot, dof_pos)
+
+        fps = float(payload.get("fps", self.input_fps))
+        if fps <= 0.0:
+            raise ValueError(f"Invalid PKL fps: {fps}")
+        self.input_fps = fps
+        self.input_dt = 1.0 / self.input_fps
+
+        self.motion_base_poss_input = torch.from_numpy(root_pos).to(torch.float32).to(self.device)
+        self.motion_base_rots_input = torch.from_numpy(root_rot).to(torch.float32).to(self.device)
+        self.motion_dof_poss_input = torch.from_numpy(dof_pos).to(torch.float32).to(self.device)
+
+        self.input_frames = self.motion_base_poss_input.shape[0]
+        self.duration = (self.input_frames - 1) * self.input_dt
+        print(
+            f"Motion loaded ({self.motion_file}), format=pkl, duration: {self.duration} sec, "
+            f"frames: {self.input_frames}, input_fps: {self.input_fps}, dof: {self.motion_dof_poss_input.shape[1]}"
+        )
 
     def _interpolate_motion(self):
         """Interpolates the motion to the output fps."""
@@ -261,6 +404,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         "body_quat_w": [],
         "body_lin_vel_w": [],
         "body_ang_vel_w": [],
+        "source_joint_names": np.array(joint_names),
     }
     file_saved = False
     # --------------------------------------------------------------------------
@@ -319,6 +463,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
                 "body_ang_vel_w",
             ):
                 log[k] = np.stack(log[k], axis=0)
+            log["joint_names"] = np.array(robot.data.joint_names)
+            log["body_names"] = np.array(robot.data.body_names)
+            log["source_motion_file"] = np.array(args_cli.input_file)
+            log["source_joint_layout"] = np.array("input_joint_names")
+            log["saved_joint_layout"] = np.array("isaaclab_articulation_order")
+            log["saved_body_layout"] = np.array("isaaclab_body_order")
 
             # np.savez("tmp/motion.npz", **log)
 

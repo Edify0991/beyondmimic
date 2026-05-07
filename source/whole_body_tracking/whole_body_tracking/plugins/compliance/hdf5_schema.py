@@ -65,6 +65,8 @@ def append_rows(h5f, path: str, values: np.ndarray) -> None:
         values = values.reshape(-1)
     elif values.ndim == 1:
         values = values.reshape(-1, ds.shape[1])
+    elif ds.ndim == 2 and ds.shape[1] == 0 and values.ndim == 2 and values.shape[1] > 0:
+        ds.resize((ds.shape[0], values.shape[1]))
 
     old_n = ds.shape[0]
     new_n = old_n + values.shape[0]

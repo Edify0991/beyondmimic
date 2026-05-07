@@ -17,7 +17,13 @@ Supported PKL layouts:
      columns: [root_pos_xyz, root_euler_xyz, joint_pos_D]
    - fps: optional
 
-2) standard_dict
+2) lafan1_flat_quat
+   dict with keys:
+   - frames: list/array with shape (T, 7 + D)
+     columns: [root_pos_xyz, root_quat_xyzw, joint_pos_D]
+   - fps: optional
+
+3) standard_dict
    dict with keys:
    - root_pos: (T, 3)
    - root_rot: (T, 4) quaternion (wxyz)
@@ -42,10 +48,10 @@ parser.add_argument(
     "--layout",
     type=str,
     default="auto",
-    choices=["auto", "amass_flat_frames", "standard_dict"],
+    choices=["auto", "amass_flat_frames", "lafan1_flat_quat", "standard_dict"],
     help=(
         "Input PKL layout type. Use auto to infer from keys: "
-        "frames -> amass_flat_frames; root_pos/root_rot/dof_pos -> standard_dict."
+        "frames -> amass_flat_frames or lafan1_flat_quat; root_pos/root_rot/dof_pos -> standard_dict."
     ),
 )
 parser.add_argument(
@@ -212,6 +218,32 @@ class MotionLoader:
         fps = float(payload.get("fps", 30.0))
         return root_pos, root_quat, dof_pos, fps
 
+    def _load_from_lafan1_flat_quat(self, payload: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        if "frames" not in payload:
+            raise KeyError("Missing key 'frames' for layout 'lafan1_flat_quat'.")
+
+        frames = np.asarray(payload["frames"], dtype=np.float32)
+        if frames.ndim != 2 or frames.shape[1] < 8:
+            raise ValueError(
+                f"Expected frames with shape (T, 7 + D). Got shape {frames.shape}."
+            )
+
+        root_pos = frames[:, 0:3]
+        root_quat = self._normalize_quat_array(frames[:, 3:7][:, [3, 0, 1, 2]])
+        dof_pos = frames[:, 7:]
+
+        fps = float(payload.get("fps", 30.0))
+        return root_pos, root_quat, dof_pos, fps
+
+    def _frames_look_like_xyzw_quat(self, payload: dict) -> bool:
+        frames = np.asarray(payload["frames"], dtype=np.float32)
+        if frames.ndim != 2 or frames.shape[1] < 8:
+            return False
+        quat_norm = np.linalg.norm(frames[:, 3:7], axis=1)
+        median_norm = float(np.median(quat_norm))
+        finite_ratio = float(np.mean(np.isfinite(quat_norm)))
+        return finite_ratio > 0.99 and 0.75 <= median_norm <= 1.25
+
     def _normalize_quat_array(self, quat: np.ndarray) -> np.ndarray:
         quat = np.asarray(quat, dtype=np.float32)
         norms = np.linalg.norm(quat, axis=1, keepdims=True)
@@ -281,6 +313,8 @@ class MotionLoader:
             return self.layout
 
         if "frames" in payload:
+            if self._frames_look_like_xyzw_quat(payload):
+                return "lafan1_flat_quat"
             return "amass_flat_frames"
 
         if all(k in payload for k in ("root_pos", "root_rot", "dof_pos")):
@@ -301,6 +335,8 @@ class MotionLoader:
         resolved_layout = self._resolve_layout(payload)
         if resolved_layout == "amass_flat_frames":
             root_pos, root_quat, dof_pos, fps = self._load_from_amass_flat_frames(payload)
+        elif resolved_layout == "lafan1_flat_quat":
+            root_pos, root_quat, dof_pos, fps = self._load_from_lafan1_flat_quat(payload)
         else:
             root_pos, root_quat, dof_pos, fps = self._load_from_standard_dict(payload)
 
@@ -478,6 +514,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         "body_quat_w": [],
         "body_lin_vel_w": [],
         "body_ang_vel_w": [],
+        "source_joint_names": np.array(joint_names),
     }
 
     file_saved = False
@@ -527,6 +564,12 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
             file_saved = True
             for k in ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w"):
                 log[k] = np.stack(log[k], axis=0)
+            log["joint_names"] = np.array(robot.data.joint_names)
+            log["body_names"] = np.array(robot.data.body_names)
+            log["source_motion_file"] = np.array(args_cli.input_file)
+            log["source_joint_layout"] = np.array("input_joint_names")
+            log["saved_joint_layout"] = np.array("isaaclab_articulation_order")
+            log["saved_body_layout"] = np.array("isaaclab_body_order")
 
             output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "motions")
             os.makedirs(output_dir, exist_ok=True)

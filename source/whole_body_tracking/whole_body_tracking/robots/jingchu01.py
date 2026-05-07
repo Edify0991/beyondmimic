@@ -35,7 +35,7 @@ JINGCHU01_URDF_PATH = os.path.abspath(
     os.path.expanduser(
         os.getenv(
             "WBT_JINGCHU01_URDF",
-            f"/home/user/wmd/jingchu01/JC01-7DOF-URDF/JC01-URDF-18所/JC01-URDF_legs.urdf",
+            f"/home/user/wmd/jingchu01/JC01-7DOF-URDF/JC01-URDF-18所/JC01-URDF.urdf",
         )
     )
 )
@@ -258,10 +258,10 @@ def _build_full_body_actuators() -> dict[str, ImplicitActuatorCfg]:
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[HIP_ROLL, HIP_YAW, HIP_PITCH, KNEE_PITCH],
             effort_limit_sim={
-                HIP_ROLL: 130.0,
-                HIP_YAW: 130.0,
-                HIP_PITCH: 130.0,
-                KNEE_PITCH: 130.0,
+                HIP_ROLL: 330.0,
+                HIP_YAW: 150.0,
+                HIP_PITCH: 330.0,
+                KNEE_PITCH: 306.0,
             },
             velocity_limit_sim={
                 HIP_ROLL: 2.094,
@@ -291,8 +291,8 @@ def _build_full_body_actuators() -> dict[str, ImplicitActuatorCfg]:
         "feet": ImplicitActuatorCfg(
             joint_names_expr=[ANKLE_PITCH, ANKLE_ROLL],
             effort_limit_sim={
-                ANKLE_PITCH: 130.0,
-                ANKLE_ROLL: 130.0,
+                ANKLE_PITCH: 90.0,
+                ANKLE_ROLL: 90.0,
             },
             velocity_limit_sim={
                 ANKLE_PITCH: 3.124,
@@ -305,12 +305,12 @@ def _build_full_body_actuators() -> dict[str, ImplicitActuatorCfg]:
         "waist_joints": ImplicitActuatorCfg(
             joint_names_expr=[WAIST_ROLL, WAIST_YAW],
             effort_limit_sim={
-                WAIST_ROLL: 50.0,
-                WAIST_YAW: 50.0,
+                WAIST_ROLL: 330.0,
+                WAIST_YAW: 150.0,
             },
             velocity_limit_sim={
-                WAIST_ROLL: 2.0,
-                WAIST_YAW: 2.0,
+                WAIST_ROLL: 2.094,
+                WAIST_YAW: 2.618,
             },
             stiffness={
                 WAIST_ROLL: STIFFNESS_A10020_P224,
@@ -328,13 +328,13 @@ def _build_full_body_actuators() -> dict[str, ImplicitActuatorCfg]:
         "arms": ImplicitActuatorCfg(
             joint_names_expr=[SHOULDER_PITCH, SHOULDER_ROLL, SHOULDER_YAW, ELBOW_PITCH, ELBOW_YAW, WRIST_PITCH, WRIST_ROLL],
             effort_limit_sim={
-                SHOULDER_PITCH: 25.0,
-                SHOULDER_ROLL: 25.0,
-                SHOULDER_YAW: 25.0,
-                ELBOW_PITCH: 25.0,
-                ELBOW_YAW: 25.0,
-                WRIST_PITCH: 10.0,
-                WRIST_ROLL: 10.0,
+                SHOULDER_PITCH: 90.0,
+                SHOULDER_ROLL: 90.0,
+                SHOULDER_YAW: 60.0,
+                ELBOW_PITCH: 60.0,
+                ELBOW_YAW: 36.0,
+                WRIST_PITCH: 36.0,
+                WRIST_ROLL: 36.0,
             },
             velocity_limit_sim={
                 SHOULDER_PITCH: 2.0,

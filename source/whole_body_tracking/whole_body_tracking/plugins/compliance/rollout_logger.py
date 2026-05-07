@@ -99,15 +99,16 @@ class ComplianceRolloutLogger:
         return {k: [] for k in keys}
 
     def _resolve_joint_ids(self, names: list[str]) -> torch.Tensor:
+        joint_count = int(self.robot.data.joint_pos.shape[1])
         if not names:
-            return torch.arange(self.robot.num_joints, device=self.device)
+            return torch.arange(joint_count, device=self.device)
         try:
             ids = self.robot.find_joints(names, preserve_order=True)[0]
             if isinstance(ids, list):
                 ids = torch.tensor(ids, dtype=torch.long, device=self.device)
-            return ids if ids.numel() > 0 else torch.arange(self.robot.num_joints, device=self.device)
+            return ids if ids.numel() > 0 else torch.arange(joint_count, device=self.device)
         except Exception:
-            return torch.arange(self.robot.num_joints, device=self.device)
+            return torch.arange(joint_count, device=self.device)
 
     def _safe_cmd_joint_pos(self) -> torch.Tensor | None:
         try:

@@ -73,6 +73,13 @@ parser.add_argument(
     default=False,
     help="Allow overwriting existing trimmed npz output file.",
 )
+parser.add_argument(
+    "--trim_frame_range",
+    nargs=2,
+    type=int,
+    metavar=("START", "END"),
+    help="Non-interactively save inclusive frame range [START, END] to npz and exit.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -272,6 +279,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     motion_file = _resolve_motion_file()
     raw_motion = _load_motion_npz(motion_file)
 
+    if args_cli.trim_frame_range is not None:
+        _save_trimmed_segment(raw_motion, motion_file, args_cli.trim_frame_range[0], args_cli.trim_frame_range[1])
+        return
+
     joint_pos = torch.tensor(raw_motion["joint_pos"], dtype=torch.float32, device=sim.device)
     joint_vel = torch.tensor(raw_motion["joint_vel"], dtype=torch.float32, device=sim.device)
     body_pos_w = torch.tensor(raw_motion["body_pos_w"], dtype=torch.float32, device=sim.device)
@@ -353,7 +364,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
             robot.write_root_state_to_sim(root_states)
             robot.write_joint_state_to_sim(joint_pos[time_steps], joint_vel[time_steps])
-            scene.write_data_to_sim()
+            # Do not push scene-managed targets after explicitly writing a replay frame,
+            # otherwise the cached scene state can overwrite the selected frame.
             sim.render()  # We don't want physics stepping (sim.step())
             scene.update(sim_dt)
 

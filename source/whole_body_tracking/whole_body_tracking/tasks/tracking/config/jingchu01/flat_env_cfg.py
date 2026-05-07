@@ -29,6 +29,47 @@ class Jingchu01FlatEnvCfg(TrackingEnvCfg):
         self.commands.motion.anchor_body_name = JINGCHU01_PROFILE.motion_anchor_body_name
         self.commands.motion.body_names = list(JINGCHU01_PROFILE.motion_body_names)
 
+        # Full-body retargeted motions use the MuJoCo/GMR joint order. Preserve that order
+        # for the policy-visible joint observations and action vector.
+        if len(JINGCHU01_PROFILE.motion_joint_names) > 12:
+            def full_body_joint_cfg() -> SceneEntityCfg:
+                return SceneEntityCfg(
+                    "robot",
+                    joint_names=list(JINGCHU01_PROFILE.motion_joint_names),
+                    preserve_order=True,
+                )
+
+            self.actions.joint_pos.preserve_order = True
+            self.observations.policy.joint_pos.params = {"asset_cfg": full_body_joint_cfg()}
+            self.observations.policy.joint_vel.params = {"asset_cfg": full_body_joint_cfg()}
+            self.observations.critic.joint_pos.params = {"asset_cfg": full_body_joint_cfg()}
+            self.observations.critic.joint_vel.params = {"asset_cfg": full_body_joint_cfg()}
+            self.rewards.joint_limit.params = {"asset_cfg": full_body_joint_cfg()}
+            self.events.add_joint_default_pos.params["asset_cfg"] = full_body_joint_cfg()
+            # Jingchu01 is larger than the original G1 setup, and full-body dance motions move
+            # wrists far from the torso. Use looser early-training termination thresholds.
+            self.terminations.anchor_pos.params["threshold"] = 0.45
+            self.terminations.anchor_ori.params["threshold"] = 1.2
+            self.terminations.ee_body_pos.params["threshold"] = 0.75
+            self.commands.motion.pose_range = {
+                "x": (-0.02, 0.02),
+                "y": (-0.02, 0.02),
+                "z": (-0.005, 0.005),
+                "roll": (-0.05, 0.05),
+                "pitch": (-0.05, 0.05),
+                "yaw": (-0.1, 0.1),
+            }
+            self.commands.motion.velocity_range = {
+                "x": (-0.05, 0.05),
+                "y": (-0.05, 0.05),
+                "z": (-0.02, 0.02),
+                "roll": (-0.05, 0.05),
+                "pitch": (-0.05, 0.05),
+                "yaw": (-0.08, 0.08),
+            }
+            self.commands.motion.joint_position_range = (-0.02, 0.02)
+            self.events.push_robot = None
+
         self.events.base_com.params["asset_cfg"] = SceneEntityCfg(
             "robot", body_names=JINGCHU01_PROFILE.motion_anchor_body_name
         )

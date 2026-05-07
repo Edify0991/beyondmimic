@@ -28,18 +28,52 @@ if TYPE_CHECKING:
 
 
 class MotionLoader:
-    def __init__(self, motion_file: str, body_indexes: Sequence[int], device: str = "cpu"):
+    def __init__(
+        self,
+        motion_file: str,
+        body_indexes: Sequence[int],
+        body_names: Sequence[str] | None = None,
+        device: str = "cpu",
+    ):
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
         data = np.load(motion_file)
         self.fps = data["fps"]
         self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
         self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
+        self.joint_names = self._load_string_list(data, "joint_names")
+        self.body_names = self._load_string_list(data, "body_names")
         self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
         self._body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
         self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
         self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
-        self._body_indexes = body_indexes
+        self._body_indexes = self._resolve_body_indexes(body_indexes, body_names, device)
         self.time_step_total = self.joint_pos.shape[0]
+
+    @staticmethod
+    def _load_string_list(data: np.lib.npyio.NpzFile, key: str) -> list[str] | None:
+        if key not in data.files:
+            return None
+        values = data[key]
+        return [str(item) for item in values.tolist()]
+
+    def _resolve_body_indexes(
+        self,
+        body_indexes: Sequence[int],
+        body_names: Sequence[str] | None,
+        device: str,
+    ) -> torch.Tensor:
+        if self.body_names is None:
+            return torch.tensor(body_indexes, dtype=torch.long, device=device)
+        if body_names is None:
+            return torch.tensor(body_indexes, dtype=torch.long, device=device)
+        motion_name_to_index = {name: i for i, name in enumerate(self.body_names)}
+        missing = [name for name in body_names if name not in motion_name_to_index]
+        if missing:
+            raise ValueError(
+                "Motion body_names metadata does not contain all command bodies. "
+                f"Missing: {missing}. motion_body_names={self.body_names}"
+            )
+        return torch.tensor([motion_name_to_index[name] for name in body_names], dtype=torch.long, device=device)
 
     @property
     def body_pos_w(self) -> torch.Tensor:
@@ -84,7 +118,12 @@ class MotionCommand(CommandTerm):
             )
         self.motion_anchor_body_index = body_indexes_list.index(self.robot_anchor_body_index)
 
-        self.motion = MotionLoader(self.cfg.motion_file, self.body_indexes, device=self.device)
+        self.motion = MotionLoader(
+            self.cfg.motion_file,
+            self.body_indexes,
+            body_names=self.cfg.body_names,
+            device=self.device,
+        )
 
         self.robot_joint_count = int(self.robot.data.joint_pos.shape[1])
         cfg_joint_names = getattr(self.cfg, "joint_names", None)
@@ -107,7 +146,25 @@ class MotionCommand(CommandTerm):
 
         motion_joint_count = int(self.motion.joint_pos.shape[1])
         selected_joint_count = int(self.joint_indexes.numel())
-        if motion_joint_count == self.robot_joint_count:
+        self.motion_joint_indexes = None
+        if self.motion.joint_names is not None:
+            if len(self.motion.joint_names) != motion_joint_count:
+                raise ValueError(
+                    "Motion joint_names metadata length mismatch. "
+                    f"len(joint_names)={len(self.motion.joint_names)}, motion_joint_count={motion_joint_count}."
+                )
+            motion_name_to_index = {name: i for i, name in enumerate(self.motion.joint_names)}
+            missing = [name for name in self.joint_names if name not in motion_name_to_index]
+            if missing:
+                raise ValueError(
+                    "Motion joint_names metadata does not contain all command joints. "
+                    f"Missing: {missing}. motion_joint_names={self.motion.joint_names}"
+                )
+            self.motion_joint_indexes = torch.tensor(
+                [motion_name_to_index[name] for name in self.joint_names], dtype=torch.long, device=self.device
+            )
+            self.motion_joint_layout = "named_joints"
+        elif motion_joint_count == self.robot_joint_count:
             self.motion_joint_layout = "full_articulation"
         elif motion_joint_count == selected_joint_count:
             self.motion_joint_layout = "selected_joints"
@@ -148,6 +205,7 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_entropy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["sampling_top1_prob"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["sampling_top1_bin"] = torch.zeros(self.num_envs, device=self.device)
+        self._warned_invalid_sampling_probabilities = False
 
     @property
     def command(self) -> torch.Tensor:  # TODO Consider again if this is the best observation
@@ -156,6 +214,8 @@ class MotionCommand(CommandTerm):
     @property
     def joint_pos(self) -> torch.Tensor:
         joint_pos = self.motion.joint_pos[self.time_steps]
+        if self.motion_joint_layout == "named_joints":
+            return joint_pos[:, self.motion_joint_indexes]
         if self.motion_joint_layout == "full_articulation":
             return joint_pos[:, self.joint_indexes]
         return joint_pos
@@ -163,6 +223,8 @@ class MotionCommand(CommandTerm):
     @property
     def joint_vel(self) -> torch.Tensor:
         joint_vel = self.motion.joint_vel[self.time_steps]
+        if self.motion_joint_layout == "named_joints":
+            return joint_vel[:, self.motion_joint_indexes]
         if self.motion_joint_layout == "full_articulation":
             return joint_vel[:, self.joint_indexes]
         return joint_vel
@@ -280,7 +342,24 @@ class MotionCommand(CommandTerm):
         )
         sampling_probabilities = torch.nn.functional.conv1d(sampling_probabilities, self.kernel.view(1, 1, -1)).view(-1)
 
-        sampling_probabilities = sampling_probabilities / sampling_probabilities.sum()
+        sampling_probabilities = torch.nan_to_num(sampling_probabilities, nan=0.0, posinf=0.0, neginf=0.0)
+        sampling_probabilities = torch.clamp(sampling_probabilities, min=0.0)
+        probability_sum = sampling_probabilities.sum()
+        has_invalid_probabilities = (not bool(torch.isfinite(probability_sum).item())) or bool(
+            (probability_sum <= 0).item()
+        )
+        if has_invalid_probabilities:
+            if not self._warned_invalid_sampling_probabilities:
+                print(
+                    "[WARN] MotionCommand adaptive sampling produced invalid probabilities. "
+                    "Falling back to uniform sampling. "
+                    f"bin_failed_count_stats=(min={self.bin_failed_count.min().item():.4f}, "
+                    f"max={self.bin_failed_count.max().item():.4f})"
+                )
+                self._warned_invalid_sampling_probabilities = True
+            sampling_probabilities = torch.full_like(sampling_probabilities, 1.0 / float(self.bin_count))
+        else:
+            sampling_probabilities = sampling_probabilities / probability_sum
 
         sampled_bins = torch.multinomial(sampling_probabilities, len(env_ids), replacement=True)
 

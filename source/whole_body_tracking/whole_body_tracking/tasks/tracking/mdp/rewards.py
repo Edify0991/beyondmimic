@@ -14,7 +14,13 @@ if TYPE_CHECKING:
 
 
 def _get_body_indexes(command: MotionCommand, body_names: list[str] | None) -> list[int]:
-    return [i for i, name in enumerate(command.cfg.body_names) if (body_names is None) or (name in body_names)]
+    body_indexes = [i for i, name in enumerate(command.cfg.body_names) if (body_names is None) or (name in body_names)]
+    if body_names is not None and not body_indexes:
+        raise ValueError(
+            "No matching body names found in motion command body list. "
+            f"requested={body_names}, available={list(command.cfg.body_names)}"
+        )
+    return body_indexes
 
 
 def motion_global_anchor_position_error_exp(env: ManagerBasedRLEnv, command_name: str, std: float) -> torch.Tensor:

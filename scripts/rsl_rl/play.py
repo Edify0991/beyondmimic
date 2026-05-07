@@ -5,6 +5,7 @@
 import argparse
 import importlib.metadata as metadata
 import inspect
+import json
 import sys
 
 from isaaclab.app import AppLauncher
@@ -31,6 +32,25 @@ parser.add_argument("--payload_site_names", type=str, default="", help="Comma-se
 parser.add_argument("--torso_reference_body_name", type=str, default="torso_link", help="Torso reference body name for relative payload motion.")
 parser.add_argument("--compliance_joint_names", type=str, default="", help="Comma-separated joint names to log; empty logs all joints.")
 parser.add_argument("--max_steps", type=int, default=0, help="Optional maximum rollout steps (0 means unlimited).")
+parser.add_argument("--policy_io_log", action="store_true", default=False, help="Log per-step policy inputs and outputs.")
+parser.add_argument(
+    "--policy_io_save_path",
+    type=str,
+    default="outputs/policy_io/play_policy_io.h5",
+    help="HDF5 path for --policy_io_log.",
+)
+parser.add_argument(
+    "--policy_io_env_ids",
+    type=str,
+    default="0",
+    help="Comma-separated env ids to log, or 'all'. Default logs env 0 only.",
+)
+parser.add_argument(
+    "--policy_io_flush_interval",
+    type=int,
+    default=50,
+    help="Flush policy IO HDF5 every N steps.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -79,6 +99,226 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
 from whole_body_tracking.plugins.compliance.rollout_logger import ComplianceRolloutLogger, RolloutLoggerCfg
+
+
+def _as_json_attr(value) -> str:
+    """Serialize small metadata objects for HDF5 attributes."""
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().tolist()
+    elif isinstance(value, slice):
+        value = {"slice": [value.start, value.stop, value.step]}
+    return json.dumps(value, ensure_ascii=True)
+
+
+def _parse_policy_io_env_ids(env_ids_arg: str, num_envs: int) -> list[int]:
+    env_ids_arg = env_ids_arg.strip().lower()
+    if env_ids_arg == "all":
+        return list(range(num_envs))
+    env_ids = [int(x.strip()) for x in env_ids_arg.split(",") if x.strip()]
+    if not env_ids:
+        raise ValueError("--policy_io_env_ids did not contain any valid env ids.")
+    invalid = [idx for idx in env_ids if idx < 0 or idx >= num_envs]
+    if invalid:
+        raise ValueError(f"--policy_io_env_ids contains invalid ids {invalid}; num_envs={num_envs}.")
+    return env_ids
+
+
+class PolicyIOLogger:
+    """Streaming HDF5 logger for exact policy-call inputs and outputs during play."""
+
+    def __init__(self, env, path: str, env_ids: list[int], flush_interval: int = 50):
+        try:
+            import h5py
+        except Exception as exc:
+            raise RuntimeError("Policy IO logging requires h5py to be installed.") from exc
+
+        self.env = env
+        self.path = os.path.abspath(path)
+        self.env_ids = list(env_ids)
+        self.flush_interval = max(int(flush_interval), 1)
+        self._step_count = 0
+        self._datasets_created = False
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.h5f = h5py.File(self.path, "w")
+        self._write_metadata()
+
+    def _write_metadata(self) -> None:
+        robot = self.env.scene["robot"]
+        attrs = self.h5f.attrs
+        attrs["env_ids"] = _as_json_attr(self.env_ids)
+        attrs["joint_names"] = _as_json_attr(list(robot.data.joint_names))
+        attrs["body_names"] = _as_json_attr(list(robot.data.body_names))
+        attrs["default_joint_pos"] = _as_json_attr(robot.data.default_joint_pos[0])
+        attrs["default_joint_vel"] = _as_json_attr(robot.data.default_joint_vel[0])
+
+        action_term = self.env.action_manager.get_term("joint_pos")
+        attrs["action_joint_names"] = _as_json_attr(list(getattr(action_term, "_joint_names", [])))
+        attrs["action_joint_ids"] = _as_json_attr(
+            self._joint_ids_to_list(getattr(action_term, "_joint_ids", []), robot.num_joints)
+        )
+        attrs["action_scale"] = _as_json_attr(self._first_env_value(getattr(action_term, "_scale", torch.empty(0))))
+        attrs["action_offset"] = _as_json_attr(self._first_env_value(getattr(action_term, "_offset", torch.empty(0))))
+
+        motion_term = self.env.command_manager.get_term("motion")
+        attrs["command_joint_names"] = _as_json_attr(list(getattr(motion_term, "joint_names", [])))
+        attrs["command_body_names"] = _as_json_attr(list(getattr(motion_term.cfg, "body_names", [])))
+        attrs["anchor_body_name"] = str(getattr(motion_term.cfg, "anchor_body_name", ""))
+
+        obs_mgr = self.env.observation_manager
+        attrs["policy_observation_names"] = _as_json_attr(list(obs_mgr.active_terms.get("policy", [])))
+        attrs["policy_group_obs_dim"] = _as_json_attr(obs_mgr.group_obs_dim.get("policy"))
+        attrs["policy_observation_slices"] = _as_json_attr(self._observation_slices())
+        attrs["logged_policy_obs_key"] = "policy"
+        attrs["policy_joint_pos_names"] = _as_json_attr(self._resolved_obs_joint_names("joint_pos"))
+        attrs["policy_joint_vel_names"] = _as_json_attr(self._resolved_obs_joint_names("joint_vel"))
+        attrs["sim_dt"] = float(self.env.cfg.sim.dt)
+        attrs["decimation"] = int(self.env.cfg.decimation)
+        attrs["control_dt"] = float(self.env.cfg.sim.dt * self.env.cfg.decimation)
+
+    @staticmethod
+    def _joint_ids_to_list(joint_ids, num_joints: int) -> list[int]:
+        if isinstance(joint_ids, slice):
+            return list(range(num_joints))[joint_ids]
+        if isinstance(joint_ids, torch.Tensor):
+            return [int(x) for x in joint_ids.detach().cpu().tolist()]
+        return [int(x) for x in joint_ids]
+
+    @staticmethod
+    def _first_env_value(value):
+        if isinstance(value, torch.Tensor) and value.ndim > 1:
+            return value[0]
+        return value
+
+    def _resolved_obs_joint_names(self, term_name: str) -> list[str]:
+        robot = self.env.scene["robot"]
+        policy_cfg = getattr(self.env.observation_manager.cfg, "policy", None)
+        term_cfg = getattr(policy_cfg, term_name, None) if policy_cfg is not None else None
+        params = getattr(term_cfg, "params", None) or {}
+        asset_cfg = params.get("asset_cfg")
+        if asset_cfg is None:
+            return list(robot.data.joint_names)
+        joint_ids = getattr(asset_cfg, "joint_ids", slice(None))
+        if isinstance(joint_ids, slice):
+            return list(robot.data.joint_names)[joint_ids]
+        return [robot.data.joint_names[int(i)] for i in joint_ids]
+
+    def _observation_slices(self) -> dict[str, list[int]]:
+        """Return flat observation slices for each active policy term."""
+        obs_mgr = self.env.observation_manager
+        names = list(obs_mgr.active_terms.get("policy", []))
+        dims = obs_mgr.group_obs_term_dim.get("policy")
+        if dims is None:
+            return {}
+
+        slices: dict[str, list[int]] = {}
+        cursor = 0
+        for name, shape in zip(names, dims, strict=False):
+            if not isinstance(shape, tuple):
+                continue
+            width = 1
+            for value in shape:
+                width *= int(value)
+            slices[name] = [cursor, cursor + width]
+            cursor += width
+        return slices
+
+    def _create_datasets(self, obs: torch.Tensor, actions: torch.Tensor, next_obs: torch.Tensor, dones: torch.Tensor) -> None:
+        num_logged_envs = len(self.env_ids)
+        obs_dim = int(obs.shape[-1])
+        action_dim = int(actions.shape[-1])
+        next_obs_dim = int(next_obs.shape[-1])
+        done_dim = 1 if dones.ndim == 1 else int(dones.shape[-1])
+
+        self.h5f.create_dataset("/time/step", shape=(0,), maxshape=(None,), dtype="i8")
+        self.h5f.create_dataset("/policy/time_step", shape=(0, num_logged_envs), maxshape=(None, num_logged_envs), dtype="i8")
+        self.h5f.create_dataset(
+            "/policy/obs", shape=(0, num_logged_envs, obs_dim), maxshape=(None, num_logged_envs, obs_dim), dtype="f4"
+        )
+        self.h5f.create_dataset(
+            "/policy/actions",
+            shape=(0, num_logged_envs, action_dim),
+            maxshape=(None, num_logged_envs, action_dim),
+            dtype="f4",
+        )
+        self.h5f.create_dataset(
+            "/policy/next_obs",
+            shape=(0, num_logged_envs, next_obs_dim),
+            maxshape=(None, num_logged_envs, next_obs_dim),
+            dtype="f4",
+        )
+        self.h5f.create_dataset("/env/dones", shape=(0, num_logged_envs, done_dim), maxshape=(None, num_logged_envs, done_dim), dtype="?")
+        self._datasets_created = True
+
+    def _motion_time_steps(self) -> torch.Tensor:
+        motion_term = self.env.command_manager.get_term("motion")
+        time_steps = getattr(motion_term, "time_steps", None)
+        if time_steps is None:
+            return torch.full((self.env.num_envs,), -1, dtype=torch.long)
+        return time_steps.detach().long().cpu()
+
+    @staticmethod
+    def _extract_policy_obs_tensor(obs) -> torch.Tensor:
+        """Extract the actor/policy tensor from TensorDict or plain observation tensors."""
+        if isinstance(obs, torch.Tensor):
+            return obs
+        for key in ("policy", "actor", "obs", "observations"):
+            try:
+                if key in obs:
+                    value = obs[key]
+                    if isinstance(value, torch.Tensor):
+                        return value
+            except Exception:
+                pass
+        try:
+            values = list(obs.values())
+        except Exception as exc:
+            raise TypeError(f"Unsupported policy observation type for logging: {type(obs)}") from exc
+        tensor_values = [value for value in values if isinstance(value, torch.Tensor)]
+        if len(tensor_values) == 1:
+            return tensor_values[0]
+        raise TypeError(
+            "Could not infer which observation tensor to log. "
+            f"Available keys: {list(obs.keys()) if hasattr(obs, 'keys') else type(obs)}"
+        )
+
+    def append_step(
+        self,
+        step: int,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        next_obs: torch.Tensor,
+        dones: torch.Tensor,
+        policy_time_steps: torch.Tensor,
+    ) -> None:
+        obs_cpu = self._extract_policy_obs_tensor(obs).detach().cpu()
+        actions_cpu = actions.detach().cpu()
+        next_obs_cpu = self._extract_policy_obs_tensor(next_obs).detach().cpu()
+        dones_cpu = dones.detach().cpu()
+        if dones_cpu.ndim == 1:
+            dones_cpu = dones_cpu[:, None]
+        if not self._datasets_created:
+            self._create_datasets(obs_cpu, actions_cpu, next_obs_cpu, dones_cpu)
+
+        row = self.h5f["/time/step"].shape[0]
+        for path in ("/time/step", "/policy/time_step", "/policy/obs", "/policy/actions", "/policy/next_obs", "/env/dones"):
+            ds = self.h5f[path]
+            ds.resize((row + 1, *ds.shape[1:]))
+
+        env_ids = torch.tensor(self.env_ids, dtype=torch.long)
+        self.h5f["/time/step"][row] = int(step)
+        self.h5f["/policy/time_step"][row] = policy_time_steps[env_ids].numpy()
+        self.h5f["/policy/obs"][row] = obs_cpu[env_ids].numpy().astype("float32", copy=False)
+        self.h5f["/policy/actions"][row] = actions_cpu[env_ids].numpy().astype("float32", copy=False)
+        self.h5f["/policy/next_obs"][row] = next_obs_cpu[env_ids].numpy().astype("float32", copy=False)
+        self.h5f["/env/dones"][row] = dones_cpu[env_ids].numpy().astype(bool, copy=False)
+
+        self._step_count += 1
+        if self._step_count % self.flush_interval == 0:
+            self.h5f.flush()
+
+    def close(self) -> None:
+        self.h5f.flush()
+        self.h5f.close()
 
 
 def _sanitize_runner_cfg_for_installed_rsl_rl(agent_cfg: RslRlOnPolicyRunnerCfg) -> dict:
@@ -263,26 +503,50 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             ),
         )
         print(f"[INFO] Compliance raw rollout logging enabled: {save_path}")
-    # simulate environment
-    while simulation_app.is_running():
-        # run everything in inference mode
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            if actions.ndim == 1:
-                actions = actions[None, :]  # 增加 batch 维度，变成 shape [1, 29]
-            # env stepping
-            obs, _, dones, infos = env.step(actions)
-            if logger is not None:
-                logger.append_step(actions, dones)
-        timestep += 1
-        if args_cli.video and timestep == args_cli.video_length:
-            break
-        if args_cli.max_steps > 0 and timestep >= args_cli.max_steps:
-            break
 
-    if logger is not None:
-        logger.close()
+    policy_io_logger = None
+    if args_cli.policy_io_log:
+        policy_io_env_ids = _parse_policy_io_env_ids(args_cli.policy_io_env_ids, env.unwrapped.num_envs)
+        policy_io_logger = PolicyIOLogger(
+            env.unwrapped,
+            args_cli.policy_io_save_path,
+            env_ids=policy_io_env_ids,
+            flush_interval=args_cli.policy_io_flush_interval,
+        )
+        print(
+            "[INFO] Policy IO logging enabled: "
+            f"{policy_io_logger.path} | env_ids={policy_io_env_ids}"
+        )
+    # simulate environment
+    try:
+        while simulation_app.is_running():
+            # run everything in inference mode
+            with torch.inference_mode():
+                # agent stepping
+                policy_obs = obs
+                policy_time_steps = (
+                    policy_io_logger._motion_time_steps() if policy_io_logger is not None else None
+                )
+                policy_obs_for_log = policy_obs.detach().clone() if policy_io_logger is not None else None
+                actions = policy(policy_obs)
+                if actions.ndim == 1:
+                    actions = actions[None, :]  # 增加 batch 维度，变成 shape [1, 29]
+                # env stepping
+                obs, _, dones, infos = env.step(actions)
+                if policy_io_logger is not None:
+                    policy_io_logger.append_step(timestep, policy_obs_for_log, actions, obs, dones, policy_time_steps)
+                if logger is not None:
+                    logger.append_step(actions, dones)
+            timestep += 1
+            if args_cli.video and timestep == args_cli.video_length:
+                break
+            if args_cli.max_steps > 0 and timestep >= args_cli.max_steps:
+                break
+    finally:
+        if policy_io_logger is not None:
+            policy_io_logger.close()
+        if logger is not None:
+            logger.close()
     # close the simulator
     env.close()
 
